@@ -16,6 +16,13 @@
 
 //! Ethcore blockchain database module
 
+extern crate semver;
+extern crate ethcore_ipc as ipc;
+extern crate ethcore_ipc_nano as nanoipc;
+extern crate serde;
+extern crate bincode;
+
+mod hypervisor;
 
 pub fn main() {
 

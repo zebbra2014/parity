@@ -55,6 +55,10 @@ travis-nightly = ["ethcore/json-tests", "dev"]
 path = "parity/main.rs"
 name = "parity"
 
+[[bin]]
+path = "parity/blockchain.rs"
+name = "parity-blockchain"
+
 [profile.release]
 debug = true
 lto = false
