@@ -38,6 +38,8 @@ use std::ops::{Deref, DerefMut};
 use hash::FixedHash;
 use elastic_array::*;
 
+use rlp::rlptraits::RlpDecodable;
+
 /// Vector like object
 pub trait VecLike<T> {
 	/// Add an element to the collection
@@ -239,6 +241,8 @@ pub enum FromBytesError {
 	NotLongEnough,
 	/// Too many bytes for the requested type
 	TooLong,
+	/// Too many bytes for the requested type
+	RlpInvalid,
 }
 
 /// Value that can be serialized from bytes array
@@ -274,6 +278,12 @@ impl FromRawBytes for Vec<u8> {
 		Ok(bytes.clone().to_vec())
 	}
 }
+//
+//impl<T> FromRawBytes for T where T: RlpDecodable {
+//	fn from_bytes(bytes: &[u8]) -> Result<Vec<u8>, FromBytesError> {
+//		T::decode(rlp::Rlp::new(bytes))
+//	}
+//}
 
 #[test]
 fn fax_raw() {

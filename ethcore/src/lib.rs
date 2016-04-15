@@ -84,6 +84,10 @@ extern crate env_logger;
 extern crate num_cpus;
 extern crate crossbeam;
 extern crate ethjson;
+extern crate bincode;
+extern crate serde;
+extern crate ethcore_ipc as ipc;
+extern crate semver;
 
 #[cfg(test)] extern crate ethcore_devtools as devtools;
 #[cfg(feature = "jit" )] extern crate evmjit;
