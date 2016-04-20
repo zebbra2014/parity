@@ -38,7 +38,7 @@
 //! fn main() {
 //! 	let mut service = NetworkService::start(NetworkConfiguration::new()).unwrap();
 //! 	let dir = env::temp_dir();
-//! 	let client = Client::new(ClientConfig::default(), ethereum::new_frontier(), &dir, service.io().channel()).unwrap();
+//! 	let client = Client::new(ClientConfig::default(), ethereum::new_frontier(), &dir, service.io().channel());
 //!
 //!		let miner: Miner = Miner::default();
 //!		// get status
@@ -61,7 +61,7 @@ extern crate rayon;
 mod miner;
 mod transaction_queue;
 
-pub use transaction_queue::{TransactionQueue, AccountDetails};
+pub use transaction_queue::{TransactionQueue, AccountDetails, TransactionImportResult};
 pub use miner::{Miner};
 
 use util::{H256, U256, Address, Bytes};
@@ -100,8 +100,20 @@ pub trait MinerService : Send + Sync {
 	/// Set the gas limit we wish to target when sealing a new block.
 	fn set_gas_floor_target(&self, target: U256);
 
+	/// Get current transactions limit in queue.
+	fn transactions_limit(&self) -> usize;
+
+	/// Set maximal number of transactions kept in the queue (both current and future).
+	fn set_transactions_limit(&self, limit: usize);
+
 	/// Imports transactions to transaction queue.
-	fn import_transactions<T>(&self, transactions: Vec<SignedTransaction>, fetch_account: T) -> Vec<Result<(), Error>>
+	fn import_transactions<T>(&self, transactions: Vec<SignedTransaction>, fetch_account: T) ->
+		Vec<Result<TransactionImportResult, Error>>
+		where T: Fn(&Address) -> AccountDetails;
+
+	/// Imports own (node owner) transaction to queue.
+	fn import_own_transaction<T>(&self, transaction: SignedTransaction, fetch_account: T) ->
+		Result<TransactionImportResult, Error>
 		where T: Fn(&Address) -> AccountDetails;
 
 	/// Returns hashes of transactions currently in pending
@@ -140,6 +152,7 @@ pub trait MinerService : Send + Sync {
 }
 
 /// Mining status
+#[derive(Debug)]
 pub struct MinerStatus {
 	/// Number of transactions in queue with state `pending` (ready to be included in block)
 	pub transactions_in_pending_queue: usize,
