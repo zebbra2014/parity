@@ -23,7 +23,7 @@ use ethcore::client::{BlockChainClient, BlockId};
 use ethcore::block::{ClosedBlock, IsBlock};
 use ethcore::error::*;
 use ethcore::transaction::SignedTransaction;
-use super::{MinerService, MinerStatus, TransactionQueue, AccountDetails};
+use super::{MinerService, MinerStatus, TransactionQueue, AccountDetails, TransactionImportResult};
 
 /// Keeps track of transactions using priority queue and holds currently mined block.
 pub struct Miner {
@@ -205,6 +205,14 @@ impl MinerService for Miner {
 		*self.gas_floor_target.read().unwrap() / x!(5)
 	}
 
+	fn transactions_limit(&self) -> usize {
+		self.transaction_queue.lock().unwrap().limit()
+	}
+
+	fn set_transactions_limit(&self, limit: usize) {
+		self.transaction_queue.lock().unwrap().set_limit(limit)
+	}
+
 	/// Get the author that we will seal blocks as.
 	fn author(&self) -> Address {
 		*self.author.read().unwrap()
@@ -220,10 +228,33 @@ impl MinerService for Miner {
 		*self.gas_floor_target.read().unwrap()
 	}
 
-	fn import_transactions<T>(&self, transactions: Vec<SignedTransaction>, fetch_account: T) -> Vec<Result<(), Error>>
+	fn import_transactions<T>(&self, transactions: Vec<SignedTransaction>, fetch_account: T) ->
+		Vec<Result<TransactionImportResult, Error>>
 		where T: Fn(&Address) -> AccountDetails {
 		let mut transaction_queue = self.transaction_queue.lock().unwrap();
 		transaction_queue.add_all(transactions, fetch_account)
+	}
+
+	fn import_own_transaction<T>(&self, transaction: SignedTransaction, fetch_account: T) ->
+		Result<TransactionImportResult, Error>
+		where T: Fn(&Address) -> AccountDetails {
+		let hash = transaction.hash();
+		trace!(target: "own_tx", "Importing transaction: {:?}", transaction);
+
+		let mut transaction_queue = self.transaction_queue.lock().unwrap();
+		let import = transaction_queue.add(transaction, &fetch_account);
+
+		match import {
+			Ok(ref res) => {
+				trace!(target: "own_tx", "Imported transaction to {:?} (hash: {:?})", res, hash);
+				trace!(target: "own_tx", "Status: {:?}", self.status());
+			},
+			Err(ref e) => {
+				trace!(target: "own_tx", "Failed to import transaction {:?} (hash: {:?})", e, hash);
+				trace!(target: "own_tx", "Status: {:?}", self.status());
+			},
+		}
+		import
 	}
 
 	fn pending_transactions_hashes(&self) -> Vec<H256> {

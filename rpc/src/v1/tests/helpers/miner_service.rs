@@ -22,7 +22,7 @@ use ethcore::error::Error;
 use ethcore::client::BlockChainClient;
 use ethcore::block::ClosedBlock;
 use ethcore::transaction::SignedTransaction;
-use ethminer::{MinerService, MinerStatus, AccountDetails};
+use ethminer::{MinerService, MinerStatus, AccountDetails, TransactionImportResult};
 
 /// Test miner service.
 pub struct TestMinerService {
@@ -39,6 +39,7 @@ pub struct TestMinerService {
 	gas_floor_target: RwLock<U256>,
 	author: RwLock<Address>,
 	extra_data: RwLock<Bytes>,
+	limit: RwLock<usize>,
 }
 
 impl Default for TestMinerService {
@@ -52,6 +53,7 @@ impl Default for TestMinerService {
 			gas_floor_target: RwLock::new(U256::from(12345)),
 			author: RwLock::new(Address::zero()),
 			extra_data: RwLock::new(vec![1, 2, 3, 4]),
+			limit: RwLock::new(1024),
 		}
 	}
 }
@@ -84,6 +86,14 @@ impl MinerService for TestMinerService {
 		*self.min_gas_price.write().unwrap() = min_gas_price;
 	}
 
+	fn set_transactions_limit(&self, limit: usize) {
+		*self.limit.write().unwrap() = limit;
+	}
+
+	fn transactions_limit(&self) -> usize {
+		*self.limit.read().unwrap()
+	}
+
 	fn author(&self) -> Address {
 		*self.author.read().unwrap()
 	}
@@ -101,15 +111,26 @@ impl MinerService for TestMinerService {
 	}
 
 	/// Imports transactions to transaction queue.
-	fn import_transactions<T>(&self, transactions: Vec<SignedTransaction>, _fetch_account: T) -> Vec<Result<(), Error>>
+	fn import_transactions<T>(&self, transactions: Vec<SignedTransaction>, _fetch_account: T) ->
+		Vec<Result<TransactionImportResult, Error>>
 		where T: Fn(&Address) -> AccountDetails {
 		// lets assume that all txs are valid
 		self.imported_transactions.lock().unwrap().extend_from_slice(&transactions);
 
 		transactions
 			.iter()
-			.map(|_| Ok(()))
+			.map(|_| Ok(TransactionImportResult::Current))
 			.collect()
+	}
+
+	/// Imports transactions to transaction queue.
+	fn import_own_transaction<T>(&self, transaction: SignedTransaction, _fetch_account: T) ->
+		Result<TransactionImportResult, Error>
+		where T: Fn(&Address) -> AccountDetails {
+		// lets assume that all txs are valid
+		self.imported_transactions.lock().unwrap().push(transaction);
+
+		Ok(TransactionImportResult::Current)
 	}
 
 	/// Returns hashes of transactions currently in pending
