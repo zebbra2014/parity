@@ -14,20 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-pub use util::*;
-pub use types::misc::*;
-pub use types::error::*;
-pub use env_info::*;
-pub use types::views::*;
-pub use builtin::*;
-pub use types::header::*;
-pub use account::*;
-pub use types::transaction::*;
-pub use log_entry::*;
-pub use receipt::*;
-pub use action_params::*;
-pub use trace::*;
-pub use std::option::Option;
-pub use std::result::Result;
-pub use std::vec::Vec;
-pub use std::convert::*;
+//! Misc types that should be serialized
+
+#![allow(dead_code, unused_assignments, unused_variables)] // codegen issues
+include!(concat!(env!("OUT_DIR"), "/types_mod.rs"));

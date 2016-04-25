@@ -17,8 +17,7 @@
 //! Unique identifiers.
 
 use util::hash::H256;
-use header::BlockNumber;
-use util::bytes::{FromRawBytes, FromBytesError, ToBytesWithMap, Populatable};
+use types::header::BlockNumber;
 
 /// Uniquely identifies block.
 #[derive(Debug, PartialEq, Clone, Hash, Eq)]
@@ -52,6 +51,3 @@ pub struct UncleId (
 	pub usize
 );
 
-sized_binary_map!(TransactionId);
-sized_binary_map!(UncleId);
-sized_binary_map!(BlockId);

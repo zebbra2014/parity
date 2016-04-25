@@ -17,9 +17,9 @@
 //! Transaction data structure.
 
 use util::*;
-use error::*;
+use types::error::*;
 use evm::Schedule;
-use header::BlockNumber;
+use types::header::BlockNumber;
 use ethjson;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

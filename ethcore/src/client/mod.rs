@@ -18,12 +18,11 @@
 
 mod client;
 mod config;
-mod ids;
 mod test_client;
 
 pub use self::client::*;
 pub use self::config::{ClientConfig, BlockQueueConfig, BlockChainConfig};
-pub use self::ids::{BlockId, TransactionId, UncleId};
+pub use types::ids::{BlockId, TransactionId, UncleId};
 pub use self::test_client::{TestBlockChainClient, EachBlockWith};
 pub use executive::Executed;
 
@@ -43,7 +42,7 @@ use receipt::LocalizedReceipt;
 use engine::{Engine};
 
 /// Blockchain database client. Owns and manages a blockchain and a block queue.
-pub trait BlockChainClient : Sync + Send {
+pub trait BlockChainClient {
 	/// Get raw block header data by block id.
 	fn block_header(&self, id: BlockId) -> Option<Bytes>;
 
@@ -130,7 +129,5 @@ pub trait BlockChainClient : Sync + Send {
 	/// Makes a non-persistent transaction call.
 	fn call(&self, t: &SignedTransaction) -> Result<Executed, Error>;
 
-	/// Executes a function providing it with a reference to an engine.
-	fn engine(&self) -> &Engine;
 }
 

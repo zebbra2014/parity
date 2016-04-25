@@ -18,10 +18,10 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrder};
 use util::*;
-use header::*;
+use types::header::*;
 use extras::*;
-use transaction::*;
-use views::*;
+use types::transaction::*;
+use types::views::*;
 use receipt::Receipt;
 use chainfilter::{ChainFilter, BloomIndex, FilterDataSource};
 use blockchain::block_info::{BlockInfo, BlockLocation, BranchBecomingCanonChainData};

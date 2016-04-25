@@ -34,8 +34,7 @@ ethcore-webapp = { path = "webapp", optional = true }
 semver = "0.2"
 ethcore-ipc-nano = { path = "ipc/nano" }
 "ethcore-ipc" = { path = "ipc/rpc" }
-bincode = "*"
-serde = "0.7.0"
+
 
 [dependencies.hyper]
 version = "0.8"

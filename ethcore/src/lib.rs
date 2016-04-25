@@ -84,29 +84,24 @@ extern crate env_logger;
 extern crate num_cpus;
 extern crate crossbeam;
 extern crate ethjson;
+extern crate ethcore_ipc as ipc;
 
 #[cfg(test)] extern crate ethcore_devtools as devtools;
 #[cfg(feature = "jit" )] extern crate evmjit;
 
-pub mod block;
 pub mod block_queue;
 pub mod client;
-pub mod error;
 pub mod ethereum;
 pub mod filter;
-pub mod header;
 pub mod service;
 pub mod log_entry;
 pub mod trace;
 pub mod spec;
-pub mod transaction;
-pub mod views;
 pub mod receipt;
 pub mod pod_state;
 
 mod db;
 mod common;
-mod basic_types;
 #[macro_use] mod evm;
 mod env_info;
 mod pod_account;
@@ -132,3 +127,5 @@ mod tests;
 #[cfg(test)]
 #[cfg(feature="json-tests")]
 mod json_tests;
+
+mod types;

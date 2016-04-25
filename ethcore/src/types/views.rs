@@ -16,8 +16,8 @@
 
 //! Block oriented views onto rlp.
 use util::*;
-use header::*;
-use transaction::*;
+use types::header::*;
+use types::transaction::*;
 
 /// View onto transaction rlp.
 pub struct TransactionView<'a> {

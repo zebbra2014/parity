@@ -14,9 +14,14 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Ethcore basic typenames.
+//! Misc types that should be serialized
 
 use util::*;
+use types::block::*;
+use util::numbers::*;
+use std::collections::HashSet;
+
+pub type SealingResult = (Option<ClosedBlock>, HashSet<H256>);
 
 /// Type for a 2048-bit log-bloom, as used by our blocks.
 pub type LogBloom = H2048;

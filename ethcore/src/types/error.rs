@@ -17,8 +17,8 @@
 //! General error types for use in ethcore.
 
 use util::*;
-use header::BlockNumber;
-use basic_types::LogBloom;
+use types::header::BlockNumber;
+use types::misc::*;
 
 /// Result of executing the transaction.
 #[derive(PartialEq, Debug)]

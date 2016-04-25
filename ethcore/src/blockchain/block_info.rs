@@ -62,35 +62,3 @@ impl FromRawBytesVariable for BranchBecomingCanonChainData {
 		Ok(BranchBecomingCanonChainData { ancestor: ancestor, enacted: enacted, retracted: retracted })
 	}
 }
-
-impl FromRawBytesVariable for BlockLocation {
-	fn from_bytes_variable(bytes: &[u8]) -> Result<BlockLocation, FromBytesError> {
-		match bytes[0] {
-			0 => Ok(BlockLocation::CanonChain),
-			1 => Ok(BlockLocation::Branch),
-			2 => Ok(BlockLocation::BranchBecomingCanonChain(
-				try!(BranchBecomingCanonChainData::from_bytes_variable(&bytes[1..bytes.len()])))),
-			_ => Err(FromBytesError::UnknownMarker)
-		}
-	}
-}
-
-impl ToBytesWithMap for BranchBecomingCanonChainData {
-	fn to_bytes_map(&self) -> Vec<u8> {
-		(&self.enacted, &self.retracted, &self.ancestor).to_bytes_map()
-	}
-}
-
-impl ToBytesWithMap for BlockLocation {
-	fn to_bytes_map(&self) -> Vec<u8> {
-		match *self {
-			BlockLocation::CanonChain => vec![0u8],
-			BlockLocation::Branch => vec![1u8],
-			BlockLocation::BranchBecomingCanonChain(ref data) => {
-				let mut bytes = (&data.enacted, &data.retracted, &data.ancestor).to_bytes_map();
-				bytes.insert(0, 2u8);
-				bytes
-			}
-		}
-	}
-}

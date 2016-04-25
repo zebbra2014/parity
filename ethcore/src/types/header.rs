@@ -17,8 +17,13 @@
 //! Block header.
 
 use util::*;
-use basic_types::*;
+use types::misc::*;
 use time::now_utc;
+use ipc::BinaryConvertable;
+use std::mem;
+use ipc::binary::BinaryConvertError;
+use std::collections::VecDeque;
+use std::convert::*;
 
 /// Type for Block number
 pub type BlockNumber = u64;
@@ -29,7 +34,7 @@ pub type BlockNumber = u64;
 /// which is non-specific.
 ///
 /// Doesn't do all that much on its own.
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Clone, Eq, Binary)]
 pub struct Header {
 	// TODO: make all private.
 	/// Parent hash.
@@ -201,7 +206,7 @@ impl Header {
  		*self.bare_hash.borrow_mut() = None;
 	}
 
-	// TODO: make these functions traity 
+	// TODO: make these functions traity
 	/// Place this header into an RLP stream `s`, optionally `with_seal`.
 	pub fn stream_rlp(&self, s: &mut RlpStream, with_seal: Seal) {
 		s.begin_list(13 + match with_seal { Seal::With => self.seal.len(), _ => 0 });
@@ -219,8 +224,8 @@ impl Header {
 		s.append(&self.timestamp);
 		s.append(&self.extra_data);
 		if let Seal::With = with_seal {
-			for b in &self.seal { 
-				s.append_raw(&b, 1); 
+			for b in &self.seal {
+				s.append_raw(&b, 1);
 			}
 		}
 	}
