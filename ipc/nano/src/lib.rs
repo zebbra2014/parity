@@ -330,8 +330,7 @@ impl mio::Handler for MioEventHandler {
 	{
 		match token {
 			PUBLIC_IPC => {
-				let server = &mut self.server;
-				match server.accept() {
+				match self.server.accept() {
 					Ok(optional_stream) => {
 						match optional_stream {
 							Some(mut stream) => {
@@ -370,14 +369,13 @@ impl IoHandlerWorker {
 	pub fn new(handler: &Arc<IoHandler>, socket_addr: &str) -> Result<IoHandlerWorker, SocketError> {
 		let listener = try!(UnixListener::bind(socket_addr).map_err(|_| SocketError::UnixBind));
 		let mut event_loop = try!(mio::EventLoop::new().map_err(|_| SocketError::EventLoop));
-		let mio_handler = MioEventHandler::new(handler, listener);
-
 		event_loop.register(
 			&listener,
 			PUBLIC_IPC,
 			mio::EventSet::readable(),
 			mio::PollOpt::edge(),
 		);
+		let mio_handler = MioEventHandler::new(handler, listener);
 
 		Ok(IoHandlerWorker {
 			event_loop: event_loop,
@@ -504,7 +502,7 @@ mod service_tests {
 
 	#[test]
 	fn test_jsonrpc_handler() {
-		let url = "ipc:///tmp/parity-test50.ipc";
+		let url = "/tmp/parity-test50.ipc";
 
 		struct SayHello;
 		impl MethodCommand for SayHello {
