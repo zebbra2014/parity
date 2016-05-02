@@ -30,8 +30,7 @@ use std::sync::*;
 use std::sync::atomic::*;
 use nanomsg::{Socket, Protocol, Error, Endpoint, PollRequest, PollFd, PollInOut};
 use std::ops::Deref;
-use mio::{EventLoop, Token};
-use mio::unix::{UnixListener, UnixStream};
+use mio::unix::{UnixListener, UnixStream, UnixSocket};
 use std::io::{Read, Write};
 
 const POLL_TIMEOUT: isize = 100;
@@ -110,6 +109,8 @@ pub enum SocketError {
 	UnixBind,
 	/// Error starting event loop
 	EventLoop,
+	/// Error while removing previous file for using in unix sockets
+	UnixRemoveFile
 }
 
 /// Error while polling
@@ -325,7 +326,7 @@ impl mio::Handler for MioEventHandler {
 	fn ready(
 		&mut self,
 		event_loop: &mut mio::EventLoop<MioEventHandler>,
-		token: Token,
+		token: mio::Token,
 		_: mio::EventSet)
 	{
 		match token {
@@ -363,10 +364,13 @@ impl mio::Handler for MioEventHandler {
 	}
 }
 
-const PUBLIC_IPC: mio::Token = Token(0);
+const PUBLIC_IPC: mio::Token = mio::Token(0);
 
 impl IoHandlerWorker {
 	pub fn new(handler: &Arc<IoHandler>, socket_addr: &str) -> Result<IoHandlerWorker, SocketError> {
+		// remove file if it exists and deleting it
+		try!(std::fs::remove_file(socket_addr).map_err(|_| SocketError::UnixRemoveFile));
+
 		let listener = try!(UnixListener::bind(socket_addr).map_err(|_| SocketError::UnixBind));
 		let mut event_loop = try!(mio::EventLoop::new().map_err(|_| SocketError::EventLoop));
 		event_loop.register(
@@ -438,8 +442,7 @@ mod service_tests {
 	}
 
 	fn dummy_request(addr: &str, buf: &[u8]) -> Vec<u8> {
-		let mut socket = Socket::new(Protocol::Req).unwrap();
-		let _endpoint = socket.connect(addr).unwrap();
+    	let mut socket = ::mio::unix::UnixStream::connect(&addr).unwrap();
 		socket.write(buf).unwrap();
 		let mut buf = Vec::new();
 		socket.read_to_end(&mut buf).unwrap();
