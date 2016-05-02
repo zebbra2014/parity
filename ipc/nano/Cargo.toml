@@ -11,4 +11,4 @@ jsonrpc-core = "2.0"
 "ethcore-ipc" = { path = "../rpc" }
 nanomsg = { git = "https://github.com/ethcore/nanomsg.rs.git" }
 log = "0.3"
-
+mio = "0.5"

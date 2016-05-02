@@ -20,6 +20,8 @@ extern crate ethcore_ipc as ipc;
 extern crate nanomsg;
 #[macro_use] extern crate log;
 extern crate jsonrpc_core;
+extern crate mio;
+
 use jsonrpc_core::IoHandler;
 
 pub use ipc::{WithSocket, IpcInterface, IpcConfig};
@@ -28,6 +30,9 @@ use std::sync::*;
 use std::sync::atomic::*;
 use nanomsg::{Socket, Protocol, Error, Endpoint, PollRequest, PollFd, PollInOut};
 use std::ops::Deref;
+use mio::{EventLoop, Token};
+use mio::unix::{UnixListener, UnixStream};
+use std::io::{Read, Write};
 
 const POLL_TIMEOUT: isize = 100;
 
@@ -101,6 +106,17 @@ pub enum SocketError {
 	DuplexLink,
 	/// Error establising duplex (paired) socket and/or endpoint
 	RequestLink,
+	/// Error binding unix socket to specific address
+	UnixBind,
+	/// Error starting event loop
+	EventLoop,
+}
+
+/// Error while polling
+#[derive(Debug)]
+pub enum PollError {
+	/// Mio polling error
+	Mio
 }
 
 impl<S> Worker<S> where S: IpcInterface<S> {
@@ -210,10 +226,13 @@ pub enum IoHandlerError {
 
 /// Worker to handle JSON RPC requests
 pub struct IoHandlerWorker {
-	handler: Arc<IoHandler>,
-	socket: Socket,
-	_endpoint: Endpoint,
-	poll: Vec<PollFd>,
+	event_loop: mio::EventLoop<MioEventHandler>,
+	mio_handler: MioEventHandler,
+}
+
+pub struct MioEventHandler {
+	rpc_handler: Arc<IoHandler>,
+	server: UnixListener,
 	buf: Vec<u8>,
 }
 
@@ -246,7 +265,10 @@ impl IoHandlerServer {
 		::std::thread::spawn(move || {
 			worker_is_stopped.store(false, Ordering::Relaxed);
 			while !worker_is_stopping.load(Ordering::Relaxed) {
-				worker.poll()
+				if worker.poll().is_err() {
+					warn!(target: "ipc", "Aborted polling due to error");
+					break;
+				}
 			}
 			worker_is_stopped.store(true, Ordering::Relaxed);
 		});
@@ -269,70 +291,103 @@ impl Drop for IoHandlerServer {
 	}
 }
 
+impl MioEventHandler {
+	fn new(rpc_handler: &Arc<IoHandler>, listener: UnixListener) -> MioEventHandler {
+		MioEventHandler {
+			rpc_handler: rpc_handler.clone(),
+			buf: Vec::with_capacity(1024),
+			server: listener,
+		}
+	}
+
+	fn handle_rpc_request(&mut self, unix_stream: &mut UnixStream) {
+		let rpc_msg = match String::from_utf8(self.buf.clone()) {
+			Ok(val) => val,
+			Err(e) => {
+				warn!(target: "ipc", "RPC decoding error (utf-8): {:?}", e);
+				return;
+			}
+		};
+		let response: Option<String> = self.rpc_handler.handle_request(&rpc_msg);
+		if let Some(response_str) = response {
+			let response_bytes = response_str.into_bytes();
+			if let Err(e) = unix_stream.write(&response_bytes) {
+				warn!(target: "ipc", "Failed to write response: {:?}", e);
+			}
+		}
+	}
+}
+
+impl mio::Handler for MioEventHandler {
+	type Timeout = ();
+	type Message = ();
+
+	fn ready(
+		&mut self,
+		event_loop: &mut mio::EventLoop<MioEventHandler>,
+		token: Token,
+		_: mio::EventSet)
+	{
+		match token {
+			PUBLIC_IPC => {
+				let server = &mut self.server;
+				match server.accept() {
+					Ok(optional_stream) => {
+						match optional_stream {
+							Some(mut stream) => {
+								match stream.read_to_end(&mut self.buf) {
+									Ok(0) => {
+										warn!(target: "ipc", "No data passed from socket");
+									},
+									Ok(_) => {
+										self.handle_rpc_request(&mut stream)
+									},
+									Err(e) => {
+										warn!(target: "ipc", "Error while reading from socket: {:?}", e);
+									},
+								}
+							}
+							None => {
+								warn!(target: "ipc", "No data passed from socket");
+							}
+						}
+					}
+					Err(_) => {
+						warn!(target: "ipc", "Error accepting connection");
+					}
+				}
+			}
+			_ => {
+				// unknown token
+			}
+		}
+	}
+}
+
+const PUBLIC_IPC: mio::Token = Token(0);
+
 impl IoHandlerWorker {
 	pub fn new(handler: &Arc<IoHandler>, socket_addr: &str) -> Result<IoHandlerWorker, SocketError> {
-		let mut socket = try!(Socket::new(Protocol::Rep).map_err(|e| {
-			warn!(target: "ipc", "Failed to create ipc socket: {:?}", e);
-			SocketError::RequestLink
-		}));
+		let listener = try!(UnixListener::bind(socket_addr).map_err(|_| SocketError::UnixBind));
+		let mut event_loop = try!(mio::EventLoop::new().map_err(|_| SocketError::EventLoop));
+		let mio_handler = MioEventHandler::new(handler, listener);
 
-		let endpoint = try!(socket.bind(socket_addr).map_err(|e| {
-			warn!(target: "ipc", "Failed to bind socket to address '{}': {:?}", socket_addr, e);
-			SocketError::RequestLink
-		}));
-
-		let poll = vec![socket.new_pollfd(PollInOut::In)];
+		event_loop.register(
+			&listener,
+			PUBLIC_IPC,
+			mio::EventSet::readable(),
+			mio::PollOpt::edge(),
+		);
 
 		Ok(IoHandlerWorker {
-			handler: handler.clone(),
-			socket: socket,
-			_endpoint: endpoint,
-			poll: poll,
-			buf: Vec::with_capacity(1024),
+			event_loop: event_loop,
+			mio_handler: mio_handler,
 		})
 	}
 
-	pub fn poll(&mut self) {
-		let mut request = PollRequest::new(&mut self.poll[..]);
- 		let _result_guard = Socket::poll(&mut request, POLL_TIMEOUT);
-		let fd = request.get_fds()[0]; 	// guaranteed to exist and be the only one
-										// because contains only immutable socket field as a member
-		if !fd.can_read() {
-			return;
-		}
-
-		unsafe { self.buf.set_len(0); }
-		match self.socket.nb_read_to_end(&mut self.buf) {
-			Ok(0) => {
-				warn!(target: "ipc", "RPC empty message received");
-				return;
-			},
-			Ok(_) => {
-				let rpc_msg = match String::from_utf8(self.buf.clone()) {
-					Ok(val) => val,
-					Err(e) => {
-						warn!(target: "ipc", "RPC decoding error (utf-8): {:?}", e);
-						return;
-					}
-				};
-				let response: Option<String> = self.handler.handle_request(&rpc_msg);
-				if let Some(response_str) = response {
-					let response_bytes = response_str.into_bytes();
-					if let Err(e) = self.socket.nb_write(&response_bytes) {
-						warn!(target: "ipc", "Failed to write response: {:?}", e);
-					}
-				}
-			},
-			Err(Error::TryAgain) => {
-				// no data
-			},
-			Err(x) => {
-				warn!(target: "ipc", "Error polling connections {:?}", x);
-				panic!("IPC RPC fatal error");
-			},
-		}
+	pub fn poll(&mut self) -> Result<(), PollError> {
+		self.event_loop.run_once(&mut self.mio_handler, Some(POLL_TIMEOUT as usize)).map_err(|_| PollError::Mio)
 	}
-
 }
 
 #[cfg(test)]
