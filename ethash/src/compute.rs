@@ -20,12 +20,14 @@
 // TODO: fix endianess for big endian
 
 use primal::is_prime;
+use std::cell::Cell;
+use std::sync::Mutex;
 use std::mem;
 use std::ptr;
 use sha3;
 use std::slice;
 use std::path::PathBuf;
-use std::io::{Read, Write, self};
+use std::io::{self, Read, Write};
 use std::fs::{self, File};
 
 pub const ETHASH_EPOCH_LENGTH: u64 = 30000;
@@ -42,14 +44,14 @@ const NODE_WORDS: usize = 64 / 4;
 const NODE_BYTES: usize = 64;
 const MIX_WORDS: usize = ETHASH_MIX_BYTES / 4;
 const MIX_NODES: usize = MIX_WORDS / NODE_WORDS;
-const FNV_PRIME: u32 =  0x01000193;
+const FNV_PRIME: u32 = 0x01000193;
 
 /// Computation result
 pub struct ProofOfWork {
 	/// Difficulty boundary
 	pub value: H256,
 	/// Mix
-	pub mix_hash: H256
+	pub mix_hash: H256,
 }
 
 struct Node {
@@ -85,6 +87,7 @@ pub type H256 = [u8; 32];
 pub struct Light {
 	block_number: u64,
 	cache: Vec<Node>,
+	seed_compute: Mutex<SeedHashCompute>,
 }
 
 /// Light cache structur
@@ -101,17 +104,17 @@ impl Light {
 		light_compute(self, header_hash, nonce)
 	}
 
-	pub fn file_path(block_number: u64) -> PathBuf {
+	pub fn file_path(seed_hash: H256) -> PathBuf {
 		let mut home = ::std::env::home_dir().unwrap();
 		home.push(".ethash");
 		home.push("light");
-		let seed_hash = get_seedhash(block_number);
 		home.push(to_hex(&seed_hash));
 		home
 	}
 
 	pub fn from_file(block_number: u64) -> io::Result<Light> {
-		let path = Light::file_path(block_number);
+		let seed_compute = SeedHashCompute::new();
+		let path = Light::file_path(seed_compute.get_seedhash(block_number));
 		let mut file = try!(File::open(path));
 
 		let cache_size = get_cache_size(block_number);
@@ -126,11 +129,13 @@ impl Light {
 		Ok(Light {
 			cache: nodes,
 			block_number: block_number,
+			seed_compute: Mutex::new(seed_compute),
 		})
 	}
 
 	pub fn to_file(&self) -> io::Result<()> {
-		let path = Light::file_path(self.block_number);
+		let seed_compute = self.seed_compute.lock().unwrap();
+		let path = Light::file_path(seed_compute.get_seedhash(self.block_number));
 		try!(fs::create_dir_all(path.parent().unwrap()));
 		let mut file = try!(File::create(path));
 
@@ -140,6 +145,51 @@ impl Light {
 		Ok(())
 	}
 }
+
+pub struct SeedHashCompute {
+	prev_epoch: Cell<u64>,
+	prev_seedhash: Cell<H256>,
+}
+
+impl SeedHashCompute {
+	#[inline]
+	pub fn new() -> SeedHashCompute {
+		SeedHashCompute {
+			prev_epoch: Cell::new(0),
+			prev_seedhash: Cell::new([0u8; 32]),
+		}
+	}
+
+	#[inline]
+	fn reset_cache(&self) {
+		self.prev_epoch.set(0);
+		self.prev_seedhash.set([0u8; 32]);
+	}
+
+	#[inline]
+	pub fn get_seedhash(&self, block_number: u64) -> H256 {
+		let epoch = block_number / ETHASH_EPOCH_LENGTH;
+		if epoch < self.prev_epoch.get() {
+			// can't build on previous hash if requesting an older block
+			self.reset_cache();
+		}
+		if epoch > self.prev_epoch.get() {
+			let seed_hash = SeedHashCompute::resume_compute_seedhash(self.prev_seedhash.get(), self.prev_epoch.get(), epoch);
+			self.prev_seedhash.set(seed_hash);
+			self.prev_epoch.set(epoch);
+		}
+		self.prev_seedhash.get()
+	}
+
+	#[inline]
+	pub fn resume_compute_seedhash(mut hash: H256, start_epoch: u64, end_epoch: u64) -> H256 {
+		for _ in start_epoch..end_epoch {
+			unsafe { sha3::sha3_256(hash[..].as_mut_ptr(), 32, hash[..].as_ptr(), 32) };
+		}
+		hash
+	}
+}
+
 
 #[inline]
 fn fnv_hash(x: u32, y: u32) -> u32 {
@@ -153,34 +203,24 @@ fn sha3_512(input: &[u8], output: &mut [u8]) {
 
 #[inline]
 fn get_cache_size(block_number: u64) -> usize {
-    let mut sz: u64 = CACHE_BYTES_INIT + CACHE_BYTES_GROWTH * (block_number / ETHASH_EPOCH_LENGTH);
-    sz = sz - NODE_BYTES as u64;
-    while !is_prime(sz / NODE_BYTES as u64) {
-        sz = sz - 2 * NODE_BYTES as u64;
-    }
-    sz as usize
+	let mut sz: u64 = CACHE_BYTES_INIT + CACHE_BYTES_GROWTH * (block_number / ETHASH_EPOCH_LENGTH);
+	sz = sz - NODE_BYTES as u64;
+	while !is_prime(sz / NODE_BYTES as u64) {
+		sz = sz - 2 * NODE_BYTES as u64;
+	}
+	sz as usize
 }
 
 #[inline]
 fn get_data_size(block_number: u64) -> usize {
-    let mut sz: u64 = DATASET_BYTES_INIT + DATASET_BYTES_GROWTH * (block_number / ETHASH_EPOCH_LENGTH);
-    sz = sz - ETHASH_MIX_BYTES as u64;
-    while !is_prime(sz / ETHASH_MIX_BYTES as u64) {
-        sz = sz - 2 * ETHASH_MIX_BYTES as u64;
-    }
-    sz as usize
+	let mut sz: u64 = DATASET_BYTES_INIT + DATASET_BYTES_GROWTH * (block_number / ETHASH_EPOCH_LENGTH);
+	sz = sz - ETHASH_MIX_BYTES as u64;
+	while !is_prime(sz / ETHASH_MIX_BYTES as u64) {
+		sz = sz - 2 * ETHASH_MIX_BYTES as u64;
+	}
+	sz as usize
 }
 
-#[inline]
-/// Given the `block_number`, determine the seed hash for Ethash.
-pub fn get_seedhash(block_number: u64) -> H256 {
-	let epochs = block_number / ETHASH_EPOCH_LENGTH;
-	let mut ret: H256 = [0u8; 32];
-	for _ in 0..epochs {
-		unsafe { sha3::sha3_256(ret[..].as_mut_ptr(), 32, ret[..].as_ptr(), 32) };
-	}
-	ret
-}
 
 /// Difficulty quick check for POW preverification
 ///
@@ -211,12 +251,12 @@ pub fn light_compute(light: &Light, header_hash: &H256, nonce: u64) -> ProofOfWo
 	hash_compute(light, full_size, header_hash, nonce)
 }
 
-fn hash_compute(light: &Light, full_size: usize,  header_hash: &H256, nonce: u64) -> ProofOfWork {
+fn hash_compute(light: &Light, full_size: usize, header_hash: &H256, nonce: u64) -> ProofOfWork {
 	if full_size % MIX_WORDS != 0 {
 		panic!("Unaligned full size");
 	}
 	// pack hash and nonce together into first 40 bytes of s_mix
-	let mut s_mix: [Node; MIX_NODES + 1] = [ Node::default(), Node::default(), Node::default() ];
+	let mut s_mix: [Node; MIX_NODES + 1] = [Node::default(), Node::default(), Node::default()];
 	unsafe { ptr::copy_nonoverlapping(header_hash.as_ptr(), s_mix.get_unchecked_mut(0).bytes.as_mut_ptr(), 32) };
 	unsafe { ptr::copy_nonoverlapping(mem::transmute(&nonce), s_mix.get_unchecked_mut(0).bytes[32..].as_mut_ptr(), 8) };
 
@@ -257,7 +297,7 @@ fn hash_compute(light: &Light, full_size: usize,  header_hash: &H256, nonce: u64
 		ptr::copy_nonoverlapping(mix.get_unchecked_mut(0).bytes.as_ptr(), buf[64..].as_mut_ptr(), 32);
 		ptr::copy_nonoverlapping(mix.get_unchecked_mut(0).bytes.as_ptr(), mix_hash.as_mut_ptr(), 32);
 		let mut value: H256 = [0u8; 32];
-		sha3::sha3_256(value.as_mut_ptr(), value.len(),  buf.as_ptr(), buf.len());
+		sha3::sha3_256(value.as_mut_ptr(), value.len(), buf.as_ptr(), buf.len());
 		ProofOfWork {
 			mix_hash: mix_hash,
 			value: value,
@@ -287,7 +327,9 @@ fn calculate_dag_item(node_index: u32, light: &Light) -> Node {
 }
 
 fn light_new(block_number: u64) -> Light {
-	let seedhash = get_seedhash(block_number);
+
+	let seed_compute = SeedHashCompute::new();
+	let seedhash = seed_compute.get_seedhash(block_number);
 	let cache_size = get_cache_size(block_number);
 
 	if cache_size % NODE_BYTES != 0 {
@@ -308,7 +350,7 @@ fn light_new(block_number: u64) -> Light {
 				let idx = *nodes.get_unchecked_mut(i).as_words().get_unchecked(0) as usize % num_nodes;
 				let mut data = nodes.get_unchecked((num_nodes - 1 + i) % num_nodes).clone();
 				for w in 0..NODE_WORDS {
-					*data.as_words_mut().get_unchecked_mut(w) ^= *nodes.get_unchecked(idx).as_words().get_unchecked(w) ;
+					*data.as_words_mut().get_unchecked_mut(w) ^= *nodes.get_unchecked(idx).as_words().get_unchecked(w);
 				}
 				sha3_512(&data.bytes, &mut nodes.get_unchecked_mut(i).bytes);
 			}
@@ -318,10 +360,11 @@ fn light_new(block_number: u64) -> Light {
 	Light {
 		cache: nodes,
 		block_number: block_number,
+		seed_compute: Mutex::new(seed_compute),
 	}
 }
 
-static CHARS: &'static[u8] = b"0123456789abcdef";
+static CHARS: &'static [u8] = b"0123456789abcdef";
 fn to_hex(bytes: &[u8]) -> String {
 	let mut v = Vec::with_capacity(bytes.len() * 2);
 	for &byte in bytes.iter() {
@@ -329,9 +372,7 @@ fn to_hex(bytes: &[u8]) -> String {
 		v.push(CHARS[(byte & 0xf) as usize]);
 	}
 
-	unsafe {
-		String::from_utf8_unchecked(v)
-	}
+	unsafe { String::from_utf8_unchecked(v) }
 }
 
 #[test]
@@ -361,8 +402,8 @@ fn test_get_data_size() {
 
 #[test]
 fn test_difficulty_test() {
-	let hash = [0xf5, 0x7e, 0x6f, 0x3a, 0xcf, 0xc0, 0xdd, 0x4b, 0x5b, 0xf2, 0xbe, 0xe4, 0x0a, 0xb3, 0x35, 0x8a, 0xa6, 0x87, 0x73, 0xa8, 0xd0, 0x9f, 0x5e, 0x59, 0x5e, 0xab, 0x55, 0x94, 0x05,  0x52, 0x7d, 0x72];
-	let mix_hash = [0x1f, 0xff, 0x04, 0xce, 0xc9, 0x41, 0x73, 0xfd, 0x59, 0x1e, 0x3d, 0x89, 0x60, 0xce, 0x6b, 0xdf, 0x8b, 0x19, 0x71, 0x04, 0x8c, 0x71, 0xff, 0x93, 0x7b, 0xb2, 0xd3, 0x2a, 0x64, 0x31, 0xab, 0x6d ];
+	let hash = [0xf5, 0x7e, 0x6f, 0x3a, 0xcf, 0xc0, 0xdd, 0x4b, 0x5b, 0xf2, 0xbe, 0xe4, 0x0a, 0xb3, 0x35, 0x8a, 0xa6, 0x87, 0x73, 0xa8, 0xd0, 0x9f, 0x5e, 0x59, 0x5e, 0xab, 0x55, 0x94, 0x05, 0x52, 0x7d, 0x72];
+	let mix_hash = [0x1f, 0xff, 0x04, 0xce, 0xc9, 0x41, 0x73, 0xfd, 0x59, 0x1e, 0x3d, 0x89, 0x60, 0xce, 0x6b, 0xdf, 0x8b, 0x19, 0x71, 0x04, 0x8c, 0x71, 0xff, 0x93, 0x7b, 0xb2, 0xd3, 0x2a, 0x64, 0x31, 0xab, 0x6d];
 	let nonce = 0xd7b3ac70a301a249;
 	let boundary_good = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x3e, 0x9b, 0x6c, 0x69, 0xbc, 0x2c, 0xe2, 0xa2, 0x4a, 0x8e, 0x95, 0x69, 0xef, 0xc7, 0xd7, 0x1b, 0x33, 0x35, 0xdf, 0x36, 0x8c, 0x9a, 0xe9, 0x7e, 0x53, 0x84];
 	assert_eq!(quick_get_difficulty(&hash, nonce, &mix_hash)[..], boundary_good[..]);
@@ -372,8 +413,8 @@ fn test_difficulty_test() {
 
 #[test]
 fn test_light_compute() {
-	let hash = [0xf5, 0x7e, 0x6f, 0x3a, 0xcf, 0xc0, 0xdd, 0x4b, 0x5b, 0xf2, 0xbe, 0xe4, 0x0a, 0xb3, 0x35, 0x8a, 0xa6, 0x87, 0x73, 0xa8, 0xd0, 0x9f, 0x5e, 0x59, 0x5e, 0xab, 0x55, 0x94, 0x05,  0x52, 0x7d, 0x72];
-	let mix_hash = [0x1f, 0xff, 0x04, 0xce, 0xc9, 0x41, 0x73, 0xfd, 0x59, 0x1e, 0x3d, 0x89, 0x60, 0xce, 0x6b, 0xdf, 0x8b, 0x19, 0x71, 0x04, 0x8c, 0x71, 0xff, 0x93, 0x7b, 0xb2, 0xd3, 0x2a, 0x64, 0x31, 0xab, 0x6d ];
+	let hash = [0xf5, 0x7e, 0x6f, 0x3a, 0xcf, 0xc0, 0xdd, 0x4b, 0x5b, 0xf2, 0xbe, 0xe4, 0x0a, 0xb3, 0x35, 0x8a, 0xa6, 0x87, 0x73, 0xa8, 0xd0, 0x9f, 0x5e, 0x59, 0x5e, 0xab, 0x55, 0x94, 0x05, 0x52, 0x7d, 0x72];
+	let mix_hash = [0x1f, 0xff, 0x04, 0xce, 0xc9, 0x41, 0x73, 0xfd, 0x59, 0x1e, 0x3d, 0x89, 0x60, 0xce, 0x6b, 0xdf, 0x8b, 0x19, 0x71, 0x04, 0x8c, 0x71, 0xff, 0x93, 0x7b, 0xb2, 0xd3, 0x2a, 0x64, 0x31, 0xab, 0x6d];
 	let boundary = [0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x3e, 0x9b, 0x6c, 0x69, 0xbc, 0x2c, 0xe2, 0xa2, 0x4a, 0x8e, 0x95, 0x69, 0xef, 0xc7, 0xd7, 0x1b, 0x33, 0x35, 0xdf, 0x36, 0x8c, 0x9a, 0xe9, 0x7e, 0x53, 0x84];
 	let nonce = 0xd7b3ac70a301a249;
 	// difficulty = 0x085657254bd9u64;
@@ -381,4 +422,35 @@ fn test_light_compute() {
 	let result = light_compute(&light, &hash, nonce);
 	assert_eq!(result.mix_hash[..], mix_hash[..]);
 	assert_eq!(result.value[..], boundary[..]);
+}
+
+#[test]
+fn test_seed_compute_once() {
+	let seed_compute = SeedHashCompute::new();
+	let hash = [241, 175, 44, 134, 39, 121, 245, 239, 228, 236, 43, 160, 195, 152, 46, 7, 199, 5, 253, 147, 241, 206, 98, 43, 3, 104, 17, 40, 192, 79, 106, 162];
+	assert_eq!(seed_compute.get_seedhash(486382), hash);
+}
+
+#[test]
+fn test_seed_compute_zero() {
+	let seed_compute = SeedHashCompute::new();
+	assert_eq!(seed_compute.get_seedhash(0), [0u8; 32]);
+}
+
+#[test]
+fn test_seed_compute_after_older() {
+	let seed_compute = SeedHashCompute::new();
+	// calculating an older value first shouldn't affect the result
+	let _ = seed_compute.get_seedhash(50000);
+	let hash = [241, 175, 44, 134, 39, 121, 245, 239, 228, 236, 43, 160, 195, 152, 46, 7, 199, 5, 253, 147, 241, 206, 98, 43, 3, 104, 17, 40, 192, 79, 106, 162];
+	assert_eq!(seed_compute.get_seedhash(486382), hash);
+}
+
+#[test]
+fn test_seed_compute_after_newer() {
+	let seed_compute = SeedHashCompute::new();
+	// calculating an newer value first shouldn't affect the result
+	let _ = seed_compute.get_seedhash(972764);
+	let hash = [241, 175, 44, 134, 39, 121, 245, 239, 228, 236, 43, 160, 195, 152, 46, 7, 199, 5, 253, 147, 241, 206, 98, 43, 3, 104, 17, 40, 192, 79, 106, 162];
+	assert_eq!(seed_compute.get_seedhash(486382), hash);
 }

@@ -155,6 +155,10 @@ impl Session {
 		self.expired
 	}
 
+	/// Check if this session is over and there is nothing to be sent.
+	pub fn done(&self) -> bool {
+		self.expired() && !self.connection.is_sending()
+	}
 	/// Replace socket token 
 	pub fn set_token(&mut self, token: StreamToken) {
 		self.connection.set_token(token);
@@ -178,9 +182,6 @@ impl Session {
 
 	/// Writable IO handler. Sends pending packets.
 	pub fn writable<Message>(&mut self, io: &IoContext<Message>, _host: &HostInfo) -> Result<(), UtilError> where Message: Send + Sync + Clone {
-		if self.expired() {
-			return Ok(()) 
-		}
 		self.connection.writable(io)
 	}
 
@@ -200,9 +201,6 @@ impl Session {
 
 	/// Update registration with the event loop. Should be called at the end of the IO handler.
 	pub fn update_socket<Host:Handler>(&self, reg:Token, event_loop: &mut EventLoop<Host>) -> Result<(), UtilError> {
-		if self.expired() {
-			return Ok(());
-		}
 		self.connection.update_socket(reg, event_loop)
 	}
 
@@ -213,6 +211,10 @@ impl Session {
 
 	/// Send a protocol packet to peer.
 	pub fn send_packet(&mut self, protocol: &str, packet_id: u8, data: &[u8]) -> Result<(), UtilError> {
+		if self.info.capabilities.is_empty() || !self.had_hello {
+			debug!(target: "network", "Sending to unconfirmed session {}, protocol: {}, packet: {}", self.token(), protocol, packet_id);
+			return Err(From::from(NetworkError::BadProtocol));
+		}
 		if self.expired() {
 			return Err(From::from(NetworkError::Expired));
 		}
@@ -311,7 +313,7 @@ impl Session {
 			.append(&host.protocol_version)
 			.append(&host.client_version)
 			.append(&host.capabilities)
-			.append(&host.listen_port)
+			.append(&host.local_endpoint.address.port())
 			.append(host.id());
 		self.connection.send_packet(&rlp.out())
 	}

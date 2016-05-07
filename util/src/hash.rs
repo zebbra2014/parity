@@ -63,7 +63,8 @@ pub trait FixedHash: Sized + BytesConvertable + Populatable + FromStr + Default 
 	fn low_u64(&self) -> u64;
 }
 
-fn clean_0x(s: &str) -> &str {
+/// Return `s` without the `0x` at the beginning of it, if any.
+pub fn clean_0x(s: &str) -> &str {
 	if s.len() >= 2 && &s[0..2] == "0x" {
 		&s[2..]
 	} else {
@@ -76,6 +77,12 @@ macro_rules! impl_hash {
 		#[derive(Eq)]
 		/// Unformatted binary data of fixed length.
 		pub struct $from (pub [u8; $size]);
+
+		impl From<[u8; $size]> for $from {
+			fn from(bytes: [u8; $size]) -> Self {
+				$from(bytes)
+			}
+		}
 
 		impl Deref for $from {
 			type Target = [u8];
@@ -391,7 +398,7 @@ macro_rules! impl_hash {
 			}
 		}
 
-		/// BitOr on references
+		/// `BitOr` on references
 		impl<'a> BitOr for &'a $from {
 			type Output = $from;
 
@@ -407,7 +414,7 @@ macro_rules! impl_hash {
 			}
 		}
 
-		/// Moving BitOr
+		/// Moving `BitOr`
 		impl BitOr for $from {
 			type Output = $from;
 
@@ -416,7 +423,7 @@ macro_rules! impl_hash {
 			}
 		}
 
-		/// BitAnd on references
+		/// `BitAnd` on references
 		impl <'a> BitAnd for &'a $from {
 			type Output = $from;
 
@@ -432,7 +439,7 @@ macro_rules! impl_hash {
 			}
 		}
 
-		/// Moving BitAnd
+		/// Moving `BitAnd`
 		impl BitAnd for $from {
 			type Output = $from;
 
@@ -441,7 +448,7 @@ macro_rules! impl_hash {
 			}
 		}
 
-		/// BitXor on references
+		/// `BitXor` on references
 		impl <'a> BitXor for &'a $from {
 			type Output = $from;
 
@@ -457,7 +464,7 @@ macro_rules! impl_hash {
 			}
 		}
 
-		/// Moving BitXor
+		/// Moving `BitXor`
 		impl BitXor for $from {
 			type Output = $from;
 

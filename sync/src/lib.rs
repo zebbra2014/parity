@@ -44,8 +44,8 @@
 //! fn main() {
 //! 	let mut service = NetworkService::start(NetworkConfiguration::new()).unwrap();
 //! 	let dir = env::temp_dir();
-//! 	let client = Client::new(ClientConfig::default(), ethereum::new_frontier(), &dir, service.io().channel()).unwrap();
-//! 	let miner = Miner::new();
+//! 	let client = Client::new(ClientConfig::default(), ethereum::new_frontier(), &dir, service.io().channel());
+//! 	let miner = Miner::new(false);
 //! 	EthSync::register(&mut service, SyncConfig::default(), client, miner);
 //! }
 //! ```
@@ -173,7 +173,7 @@ impl NetworkProtocolHandler<SyncMessage> for EthSync {
 			SyncMessage::NewChainHead => {
 				let mut sync_io = NetSyncIo::new(io, self.chain.deref());
 				self.sync.write().unwrap().chain_new_head(&mut sync_io);
-			}
+			},
 			_ => {/* Ignore other messages */},
 		}
 	}

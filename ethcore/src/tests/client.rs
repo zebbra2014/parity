@@ -21,24 +21,27 @@ use common::*;
 use devtools::*;
 
 #[test]
-fn created() {
-	let dir = RandomTempPath::new();
-	let client_result = Client::new(ClientConfig::default(), get_test_spec(), dir.as_path(), IoChannel::disconnected());
-	assert!(client_result.is_ok());
-}
-
-#[test]
 fn imports_from_empty() {
 	let dir = RandomTempPath::new();
-	let client = Client::new(ClientConfig::default(), get_test_spec(), dir.as_path(), IoChannel::disconnected()).unwrap();
+	let client = Client::new(ClientConfig::default(), get_test_spec(), dir.as_path(), IoChannel::disconnected());
 	client.import_verified_blocks(&IoChannel::disconnected());
 	client.flush_queue();
 }
 
 #[test]
+fn returns_state_root_basic() {
+	let client_result = generate_dummy_client(6);
+	let client = client_result.reference();
+	let test_spec = get_test_spec();
+	let state_root = test_spec.genesis_header().state_root;
+
+	assert!(client.state_data(&state_root).is_some());
+}
+
+#[test]
 fn imports_good_block() {
 	let dir = RandomTempPath::new();
-	let client = Client::new(ClientConfig::default(), get_test_spec(), dir.as_path(), IoChannel::disconnected()).unwrap();
+	let client = Client::new(ClientConfig::default(), get_test_spec(), dir.as_path(), IoChannel::disconnected());
 	let good_block = get_good_dummy_block();
 	if let Err(_) = client.import_block(good_block) {
 		panic!("error importing block being good by definition");
@@ -53,7 +56,7 @@ fn imports_good_block() {
 #[test]
 fn query_none_block() {
 	let dir = RandomTempPath::new();
-	let client = Client::new(ClientConfig::default(), get_test_spec(), dir.as_path(), IoChannel::disconnected()).unwrap();
+	let client = Client::new(ClientConfig::default(), get_test_spec(), dir.as_path(), IoChannel::disconnected());
 
     let non_existant = client.block_header(BlockId::Number(188));
 	assert!(non_existant.is_none());
@@ -133,8 +136,8 @@ fn can_mine() {
 	let client_result = get_test_client_with_blocks(vec![dummy_blocks[0].clone()]);
 	let client = client_result.reference();
 
-	let b = client.prepare_sealing(Address::default(), vec![], vec![]).unwrap();
+	let b = client.prepare_sealing(Address::default(), x!(31415926), vec![], vec![]).0.unwrap();
 
 	assert_eq!(*b.block().header().parent_hash(), BlockView::new(&dummy_blocks[0]).header_view().sha3());
-	assert!(client.try_seal(b, vec![]).is_ok());
+	assert!(client.try_seal(b.lock(), vec![]).is_ok());
 }

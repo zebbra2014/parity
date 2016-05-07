@@ -20,23 +20,31 @@ mod client;
 mod config;
 mod ids;
 mod test_client;
+mod trace;
 
 pub use self::client::*;
-pub use self::config::{ClientConfig, BlockQueueConfig, BlockChainConfig};
-pub use self::ids::{BlockId, TransactionId};
+pub use self::config::{ClientConfig, BlockQueueConfig, BlockChainConfig, Switch};
+pub use self::ids::{BlockId, TransactionId, UncleId, TraceId};
 pub use self::test_client::{TestBlockChainClient, EachBlockWith};
+pub use self::trace::Filter as TraceFilter;
+pub use executive::{Executed, Executive, TransactOptions};
+pub use env_info::{LastHashes, EnvInfo};
 
+use std::collections::HashSet;
 use util::bytes::Bytes;
 use util::hash::{Address, H256, H2048};
 use util::numbers::U256;
 use blockchain::TreeRoute;
 use block_queue::BlockQueueInfo;
-use block::{ClosedBlock, SealedBlock};
-use header::BlockNumber;
+use block::{ClosedBlock, LockedBlock, SealedBlock};
+use header::{BlockNumber, Header};
 use transaction::{LocalizedTransaction, SignedTransaction};
 use log_entry::LocalizedLogEntry;
 use filter::Filter;
-use error::{ImportResult};
+use error::{ImportResult, Error};
+use receipt::LocalizedReceipt;
+use engine::{Engine};
+use trace::LocalizedTrace;
 
 /// Blockchain database client. Owns and manages a blockchain and a block queue.
 pub trait BlockChainClient : Sync + Send {
@@ -74,6 +82,12 @@ pub trait BlockChainClient : Sync + Send {
 	/// Get transaction with given hash.
 	fn transaction(&self, id: TransactionId) -> Option<LocalizedTransaction>;
 
+	/// Get uncle with given id.
+	fn uncle(&self, id: UncleId) -> Option<Header>;
+
+	/// Get transaction receipt with given hash.
+	fn transaction_receipt(&self, id: TransactionId) -> Option<LocalizedReceipt>;
+
 	/// Get a tree route between `from` and `to`.
 	/// See `BlockChain::tree_route`.
 	fn tree_route(&self, from: &H256, to: &H256) -> Option<TreeRoute>;
@@ -110,11 +124,32 @@ pub trait BlockChainClient : Sync + Send {
 
 	// TODO [todr] Should be moved to miner crate eventually.
 	/// Returns ClosedBlock prepared for sealing.
-	fn prepare_sealing(&self, author: Address, extra_data: Bytes, transactions: Vec<SignedTransaction>) -> Option<ClosedBlock>;
+	fn prepare_sealing(&self, author: Address, gas_floor_target: U256, extra_data: Bytes, transactions: Vec<SignedTransaction>)
+		-> (Option<ClosedBlock>, HashSet<H256>);
 
 	// TODO [todr] Should be moved to miner crate eventually.
 	/// Attempts to seal given block. Returns `SealedBlock` on success and the same block in case of error.
-	fn try_seal(&self, block: ClosedBlock, seal: Vec<Bytes>) -> Result<SealedBlock, ClosedBlock>;
+	fn try_seal(&self, block: LockedBlock, seal: Vec<Bytes>) -> Result<SealedBlock, LockedBlock>;
 
+	/// Makes a non-persistent transaction call.
+	fn call(&self, t: &SignedTransaction) -> Result<Executed, Error>;
+
+	/// Executes a function providing it with a reference to an engine.
+	fn engine(&self) -> &Engine;
+
+	/// Returns traces matching given filter.
+	fn filter_traces(&self, filter: TraceFilter) -> Option<Vec<LocalizedTrace>>;
+
+	/// Returns trace with given id.
+	fn trace(&self, trace: TraceId) -> Option<LocalizedTrace>;
+
+	/// Returns traces created by transaction.
+	fn transaction_traces(&self, trace: TransactionId) -> Option<Vec<LocalizedTrace>>;
+
+	/// Returns traces created by transaction from block.
+	fn block_traces(&self, trace: BlockId) -> Option<Vec<LocalizedTrace>>;
+
+	/// Get last hashes starting from best block.
+	fn last_hashes(&self) -> LastHashes;
 }
 

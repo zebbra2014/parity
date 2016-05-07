@@ -24,12 +24,13 @@ use transaction::*;
 use views::*;
 use receipt::Receipt;
 use chainfilter::{ChainFilter, BloomIndex, FilterDataSource};
-use blockchain::block_info::{BlockInfo, BlockLocation};
+use blockchain::block_info::{BlockInfo, BlockLocation, BranchBecomingCanonChainData};
 use blockchain::best_block::BestBlock;
 use blockchain::bloom_indexer::BloomIndexer;
 use blockchain::tree_route::TreeRoute;
 use blockchain::update::ExtrasUpdate;
 use blockchain::{CacheSize, ImportRoute};
+use db::{Writable, Readable, Key, CacheUpdatePolicy};
 
 const BLOOM_INDEX_SIZE: usize = 16;
 const BLOOM_LEVELS: u8 = 3;
@@ -98,6 +99,11 @@ pub trait BlockProvider {
 	/// Get transaction with given transaction hash.
 	fn transaction(&self, address: &TransactionAddress) -> Option<LocalizedTransaction> {
 		self.block(&address.block_hash).and_then(|bytes| BlockView::new(&bytes).localized_transaction_at(address.index))
+	}
+
+	/// Get transaction receipt.
+	fn transaction_receipt(&self, address: &TransactionAddress) -> Option<Receipt> {
+		self.block_receipts(&address.block_hash).and_then(|br| br.receipts.into_iter().nth(address.index))
 	}
 
 	/// Get a list of transactions for a given block.
@@ -174,7 +180,7 @@ impl BlockProvider for BlockChain {
 	/// Returns true if the given block is known
 	/// (though not necessarily a part of the canon chain).
 	fn is_known(&self, hash: &H256) -> bool {
-		self.query_extras_exist(hash, &self.block_details)
+		self.extras_db.exists_with_cache(&self.block_details, hash)
 	}
 
 	/// Get raw block data
@@ -303,8 +309,8 @@ impl BlockChain {
 				bc.blocks_db.put(&hash, genesis).unwrap();
 
 				let batch = DBTransaction::new();
-				batch.put_extras(&hash, &details);
-				batch.put_extras(&header.number(), &hash);
+				batch.write(&hash, &details);
+				batch.write(&header.number(), &hash);
 				batch.put(b"best", &hash).unwrap();
 				bc.extras_db.write(batch).unwrap();
 
@@ -416,6 +422,7 @@ impl BlockChain {
 		}
 	}
 
+	#[cfg_attr(feature="dev", allow(similar_names))]
 	/// Inserts the block into backing cache database.
 	/// Expects the block to be valid and already verified.
 	/// If the block is already known, does nothing.
@@ -453,28 +460,22 @@ impl BlockChain {
 		batch.put(b"best", &update.info.hash).unwrap();
 
 		{
-			let mut write_details = self.block_details.write().unwrap();
-			for (hash, details) in update.block_details.into_iter() {
-				batch.put_extras(&hash, &details);
-				self.note_used(CacheID::Extras(ExtrasIndex::BlockDetails, hash.clone()));
-				write_details.insert(hash, details);
+			for hash in update.block_details.keys().cloned() {
+				self.note_used(CacheID::Extras(ExtrasIndex::BlockDetails, hash));
 			}
+
+			let mut write_details = self.block_details.write().unwrap();
+			batch.extend_with_cache(&mut write_details, update.block_details, CacheUpdatePolicy::Overwrite);
 		}
 
 		{
 			let mut write_receipts = self.block_receipts.write().unwrap();
-			for (hash, receipt) in &update.block_receipts {
-				batch.put_extras(hash, receipt);
-				write_receipts.remove(hash);
-			}
+			batch.extend_with_cache(&mut write_receipts, update.block_receipts, CacheUpdatePolicy::Remove);
 		}
 
 		{
 			let mut write_blocks_blooms = self.blocks_blooms.write().unwrap();
-			for (bloom_hash, blocks_bloom) in &update.blocks_blooms {
-				batch.put_extras(bloom_hash, blocks_bloom);
-				write_blocks_blooms.remove(bloom_hash);
-			}
+			batch.extend_with_cache(&mut write_blocks_blooms, update.blocks_blooms, CacheUpdatePolicy::Remove);
 		}
 
 		// These cached values must be updated last and togeterh
@@ -495,19 +496,12 @@ impl BlockChain {
 				}
 			}
 
-			for (number, hash) in &update.block_hashes {
-				batch.put_extras(number, hash);
-				write_hashes.remove(number);
-			}
+			batch.extend_with_cache(&mut write_hashes, update.block_hashes, CacheUpdatePolicy::Remove);
+			batch.extend_with_cache(&mut write_txs, update.transactions_addresses, CacheUpdatePolicy::Remove);
 
-			for (hash, tx_address) in &update.transactions_addresses {
-				batch.put_extras(hash, tx_address);
-				write_txs.remove(hash);
-			}
+			// update extras database
+			self.extras_db.write(batch).unwrap();
 		}
-
-		// update extras database
-		self.extras_db.write(batch).unwrap();
 	}
 
 	/// Iterator that lists `first` and then all of `first`'s ancestors, by hash.
@@ -541,7 +535,7 @@ impl BlockChain {
 		Some(ret)
 	}
 
-	/// Get inserted block info which is critical to preapre extras updates.
+	/// Get inserted block info which is critical to prepare extras updates.
 	fn block_info(&self, block_bytes: &[u8]) -> BlockInfo {
 		let block = BlockView::new(block_bytes);
 		let header = block.header_view();
@@ -570,11 +564,11 @@ impl BlockChain {
 					_ => {
 						let retracted = route.blocks.iter().take(route.index).cloned().collect::<Vec<H256>>();
 
-						BlockLocation::BranchBecomingCanonChain {
+						BlockLocation::BranchBecomingCanonChain(BranchBecomingCanonChainData {
 							ancestor: route.ancestor,
 							enacted: route.blocks.into_iter().skip(route.index).collect(),
 							retracted: retracted.into_iter().rev().collect(),
-						}
+						})
 					}
 				}
 			} else {
@@ -595,11 +589,11 @@ impl BlockChain {
 			BlockLocation::CanonChain => {
 				block_hashes.insert(number, info.hash.clone());
 			},
-			BlockLocation::BranchBecomingCanonChain { ref ancestor, ref enacted, .. } => {
-				let ancestor_number = self.block_number(ancestor).unwrap();
+			BlockLocation::BranchBecomingCanonChain(ref data) => {
+				let ancestor_number = self.block_number(&data.ancestor).unwrap();
 				let start_number = ancestor_number + 1;
 
-				for (index, hash) in enacted.iter().cloned().enumerate() {
+				for (index, hash) in data.enacted.iter().cloned().enumerate() {
 					block_hashes.insert(start_number + index as BlockNumber, hash);
 				}
 
@@ -684,11 +678,11 @@ impl BlockChain {
 				ChainFilter::new(self, self.bloom_indexer.index_size(), self.bloom_indexer.levels())
 					.add_bloom(&header.log_bloom(), header.number() as usize)
 			},
-			BlockLocation::BranchBecomingCanonChain { ref ancestor, ref enacted, .. } => {
-				let ancestor_number = self.block_number(ancestor).unwrap();
+			BlockLocation::BranchBecomingCanonChain(ref data) => {
+				let ancestor_number = self.block_number(&data.ancestor).unwrap();
 				let start_number = ancestor_number + 1;
 
-				let mut blooms: Vec<H2048> = enacted.iter()
+				let mut blooms: Vec<H2048> = data.enacted.iter()
 					.map(|hash| self.block(hash).unwrap())
 					.map(|bytes| BlockView::new(&bytes).header_view().log_bloom())
 					.collect();
@@ -734,38 +728,13 @@ impl BlockChain {
 		self.query_extras(hash, &self.blocks_blooms)
 	}
 
-	fn query_extras<K, T>(&self, hash: &K, cache: &RwLock<HashMap<K, T>>) -> Option<T> where
-		T: Clone + Decodable + ExtrasIndexable,
-		K: ExtrasSliceConvertable + Eq + Hash + Clone {
-		{
-			let read = cache.read().unwrap();
-			if let Some(v) = read.get(hash) {
-				return Some(v.clone());
-			}
-		}
-
-		if let Some(h) = hash.as_h256() {
-			self.note_used(CacheID::Extras(T::extras_index(), h.clone()));
-		}
-
-		self.extras_db.get_extras(hash).map(| t: T | {
-			let mut write = cache.write().unwrap();
-			write.insert(hash.clone(), t.clone());
-			t
-		})
-	}
-
-	fn query_extras_exist<K, T>(&self, hash: &K, cache: &RwLock<HashMap<K, T>>) -> bool where
-		K: ExtrasSliceConvertable + Eq + Hash + Clone,
-		T: ExtrasIndexable {
-		{
-			let read = cache.read().unwrap();
-			if let Some(_) = read.get(hash) {
-				return true;
-			}
-		}
-
-		self.extras_db.extras_exists::<_, T>(hash)
+	fn query_extras<K, T, R>(&self, hash: &K, cache: &RwLock<HashMap<K, T>>) -> Option<T> where
+		T: ExtrasIndexable + Clone + Decodable,
+		K: Key<T, Target = R> + Eq + Hash + Clone,
+		R: Deref<Target = [u8]>,
+		H256: From<K> {
+		self.note_used(CacheID::Extras(T::index(), H256::from(hash.clone())));
+		self.extras_db.read_with_cache(cache, hash)
 	}
 
 	/// Get current cache size.
@@ -819,7 +788,8 @@ impl BlockChain {
 						CacheID::Extras(ExtrasIndex::BlockLogBlooms, h) => { block_logs.remove(&h); },
 						CacheID::Extras(ExtrasIndex::BlocksBlooms, h) => { blocks_blooms.remove(&h); },
 						CacheID::Extras(ExtrasIndex::BlockReceipts, h) => { block_receipts.remove(&h); },
-						_ => panic!(),
+						// TODO: debris, temporary fix
+						CacheID::Extras(ExtrasIndex::BlockHash, _) => { },
 					}
 				}
 				cache_man.cache_usage.push_front(HashSet::new());
@@ -844,6 +814,7 @@ impl BlockChain {
 
 #[cfg(test)]
 mod tests {
+	#![cfg_attr(feature="dev", allow(similar_names))]
 	use std::str::FromStr;
 	use rustc_serialize::hex::FromHex;
 	use util::hash::*;
@@ -974,21 +945,25 @@ mod tests {
 		assert_eq!(ir1, ImportRoute {
 			enacted: vec![b1_hash],
 			retracted: vec![],
+			omitted: vec![],
 		});
 
 		assert_eq!(ir2, ImportRoute {
 			enacted: vec![b2_hash],
 			retracted: vec![],
+			omitted: vec![],
 		});
 
 		assert_eq!(ir3b, ImportRoute {
 			enacted: vec![b3b_hash],
 			retracted: vec![],
+			omitted: vec![],
 		});
 
 		assert_eq!(ir3a, ImportRoute {
 			enacted: vec![b3a_hash],
 			retracted: vec![b3b_hash],
+			omitted: vec![],
 		});
 
 		assert_eq!(bc.best_block_hash(), best_block_hash);

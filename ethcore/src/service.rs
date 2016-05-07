@@ -60,8 +60,8 @@ impl ClientService {
 		panic_handler.forward_from(&net_service);
 
 		info!("Starting {}", net_service.host_info());
-		info!("Configured for {} using {} engine", spec.name, spec.engine_name);
-		let client = try!(Client::new(config, spec, db_path, net_service.io().channel()));
+		info!("Configured for {} using {:?} engine", spec.name, spec.engine.name());
+		let client = Client::new(config, spec, db_path, net_service.io().channel());
 		panic_handler.forward_from(client.deref());
 		let client_io = Arc::new(ClientIoHandler {
 			client: client.clone()
@@ -146,7 +146,7 @@ mod tests {
 	fn it_can_be_started() {
 		let spec = get_test_spec();
 		let temp_path = RandomTempPath::new();
-		let service = ClientService::start(ClientConfig::default(), spec, NetworkConfiguration::new_with_port(40456), &temp_path.as_path());
+		let service = ClientService::start(ClientConfig::default(), spec, NetworkConfiguration::new_local(), &temp_path.as_path());
 		assert!(service.is_ok());
 	}
 }

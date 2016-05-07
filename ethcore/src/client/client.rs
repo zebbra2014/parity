@@ -17,11 +17,12 @@
 //! Blockchain database client.
 
 use std::marker::PhantomData;
+use std::path::PathBuf;
 use util::*;
 use util::panics::*;
 use views::BlockView;
 use error::*;
-use header::{BlockNumber};
+use header::{BlockNumber, Header};
 use state::State;
 use spec::Spec;
 use engine::Engine;
@@ -30,14 +31,20 @@ use service::{NetSyncMessage, SyncMessage};
 use env_info::LastHashes;
 use verification::*;
 use block::*;
-use transaction::{LocalizedTransaction, SignedTransaction};
+use transaction::{LocalizedTransaction, SignedTransaction, Action};
 use extras::TransactionAddress;
 use filter::Filter;
 use log_entry::LocalizedLogEntry;
 use block_queue::{BlockQueue, BlockQueueInfo};
 use blockchain::{BlockChain, BlockProvider, TreeRoute, ImportRoute};
-use client::{BlockId, TransactionId, ClientConfig, BlockChainClient};
+use client::{BlockId, TransactionId, UncleId, TraceId, ClientConfig, BlockChainClient, TraceFilter};
+use env_info::EnvInfo;
+use executive::{Executive, Executed, TransactOptions, contract_address};
+use receipt::LocalizedReceipt;
 pub use blockchain::CacheSize as BlockChainCacheSize;
+use trace::{TraceDB, ImportRequest as TraceImportRequest, LocalizedTrace, Database as TraceDatabase, Filter as
+	TracedbFilter};
+use trace;
 
 /// General block status
 #[derive(Debug, Eq, PartialEq)]
@@ -99,6 +106,7 @@ impl ClientReport {
 /// Call `import_block()` to import a block asynchronously; `flush_queue()` flushes the queue.
 pub struct Client<V = CanonVerifier> where V: Verifier {
 	chain: Arc<BlockChain>,
+	tracedb: Arc<TraceDB<BlockChain>>,
 	engine: Arc<Box<Engine>>,
 	state_db: Mutex<Box<JournalDB>>,
 	block_queue: BlockQueue,
@@ -108,44 +116,61 @@ pub struct Client<V = CanonVerifier> where V: Verifier {
 	verifier: PhantomData<V>,
 }
 
-const HISTORY: u64 = 1000;
-const CLIENT_DB_VER_STR: &'static str = "5.2";
+const HISTORY: u64 = 1200;
+// DO NOT TOUCH THIS ANY MORE UNLESS YOU REALLY KNOW WHAT YOU'RE DOING.
+// Altering it will force a blanket DB update for *all* JournalDB-derived
+//   databases.
+// Instead, add/upgrade the version string of the individual JournalDB-derived database
+// of which you actually want force an upgrade.
+const CLIENT_DB_VER_STR: &'static str = "5.3";
 
 impl Client<CanonVerifier> {
 	/// Create a new client with given spec and DB path.
-	pub fn new(config: ClientConfig, spec: Spec, path: &Path, message_channel: IoChannel<NetSyncMessage> ) -> Result<Arc<Client>, Error> {
+	pub fn new(config: ClientConfig, spec: Spec, path: &Path, message_channel: IoChannel<NetSyncMessage> ) -> Arc<Client> {
 		Client::<CanonVerifier>::new_with_verifier(config, spec, path, message_channel)
 	}
 }
 
+/// Get the path for the databases given the root path and information on the databases.
+pub fn get_db_path(path: &Path, pruning: journaldb::Algorithm, genesis_hash: H256) -> PathBuf {
+	let mut dir = path.to_path_buf();
+	dir.push(H64::from(genesis_hash).hex());
+	//TODO: sec/fat: pruned/full versioning
+	// version here is a bit useless now, since it's controlled only be the pruning algo.
+	dir.push(format!("v{}-sec-{}", CLIENT_DB_VER_STR, pruning));
+	dir
+}
+
+/// Append a path element to the given path and return the string.
+pub fn append_path(path: &Path, item: &str) -> String {
+	let mut p = path.to_path_buf();
+	p.push(item);
+	p.to_str().unwrap().to_owned()
+}
+
 impl<V> Client<V> where V: Verifier {
 	///  Create a new client with given spec and DB path and custom verifier.
-	pub fn new_with_verifier(config: ClientConfig, spec: Spec, path: &Path, message_channel: IoChannel<NetSyncMessage> ) -> Result<Arc<Client<V>>, Error> {
-		let mut dir = path.to_path_buf();
-		dir.push(H64::from(spec.genesis_header().hash()).hex());
-		//TODO: sec/fat: pruned/full versioning
-		// version here is a bit useless now, since it's controlled only be the pruning algo.
-		dir.push(format!("v{}-sec-{}", CLIENT_DB_VER_STR, config.pruning));
-		let path = dir.as_path();
+	pub fn new_with_verifier(config: ClientConfig, spec: Spec, path: &Path, message_channel: IoChannel<NetSyncMessage> ) -> Arc<Client<V>> {
+		let path = get_db_path(path, config.pruning, spec.genesis_header().hash());
 		let gb = spec.genesis_block();
-		let chain = Arc::new(BlockChain::new(config.blockchain, &gb, path));
-		let mut state_path = path.to_path_buf();
-		state_path.push("state");
+		let chain = Arc::new(BlockChain::new(config.blockchain, &gb, &path));
+		let tracedb = Arc::new(TraceDB::new(config.tracing, &path, chain.clone()));
 
-		let engine = Arc::new(try!(spec.to_engine()));
-		let state_path_str = state_path.to_str().unwrap();
-		let mut state_db = journaldb::new(state_path_str, config.pruning);
+		let mut state_db = journaldb::new(&append_path(&path, "state"), config.pruning);
 
-		if state_db.is_empty() && engine.spec().ensure_db_good(state_db.as_hashdb_mut()) {
-			state_db.commit(0, &engine.spec().genesis_header().hash(), None).expect("Error commiting genesis state to state DB");
+		if state_db.is_empty() && spec.ensure_db_good(state_db.as_hashdb_mut()) {
+			state_db.commit(0, &spec.genesis_header().hash(), None).expect("Error commiting genesis state to state DB");
 		}
+
+		let engine = Arc::new(spec.engine);
 
 		let block_queue = BlockQueue::new(config.queue, engine.clone(), message_channel);
 		let panic_handler = PanicHandler::new_in_arc();
 		panic_handler.forward_from(&block_queue);
 
-		Ok(Arc::new(Client {
+		Arc::new(Client {
 			chain: chain,
+			tracedb: tracedb,
 			engine: engine,
 			state_db: Mutex::new(state_db),
 			block_queue: block_queue,
@@ -153,7 +178,7 @@ impl<V> Client<V> where V: Verifier {
 			import_lock: Mutex::new(()),
 			panic_handler: panic_handler,
 			verifier: PhantomData,
-		}))
+		})
 	}
 
 	/// Flush the block import queue.
@@ -176,7 +201,7 @@ impl<V> Client<V> where V: Verifier {
 		last_hashes
 	}
 
-	fn check_and_close_block(&self, block: &PreverifiedBlock) -> Result<ClosedBlock, ()> {
+	fn check_and_close_block(&self, block: &PreverifiedBlock) -> Result<LockedBlock, ()> {
 		let engine = self.engine.deref().deref();
 		let header = &block.header;
 
@@ -204,22 +229,22 @@ impl<V> Client<V> where V: Verifier {
 		// Enact Verified Block
 		let parent = chain_has_parent.unwrap();
 		let last_hashes = self.build_last_hashes(header.parent_hash.clone());
-		let db = self.state_db.lock().unwrap().spawn();
+		let db = self.state_db.lock().unwrap().boxed_clone();
 
-		let enact_result = enact_verified(&block, engine, db, &parent, last_hashes);
+		let enact_result = enact_verified(&block, engine, self.tracedb.tracing_enabled(), db, &parent, last_hashes);
 		if let Err(e) = enact_result {
 			warn!(target: "client", "Block import failed for #{} ({})\nError: {:?}", header.number(), header.hash(), e);
 			return Err(());
 		};
 
 		// Final Verification
-		let closed_block = enact_result.unwrap();
-		if let Err(e) = V::verify_block_final(&header, closed_block.block().header()) {
+		let locked_block = enact_result.unwrap();
+		if let Err(e) = V::verify_block_final(&header, locked_block.block().header()) {
 			warn!(target: "client", "Stage 4 block verification failed for #{} ({})\nError: {:?}", header.number(), header.hash(), e);
 			return Err(());
 		}
 
-		Ok(closed_block)
+		Ok(locked_block)
 	}
 
 	fn calculate_enacted_retracted(&self, import_results: Vec<ImportRoute>) -> (Vec<H256>, Vec<H256>) {
@@ -247,7 +272,7 @@ impl<V> Client<V> where V: Verifier {
 		// And convert tuples to keys
 		(map_to_vec(enacted), map_to_vec(retracted))
 	}
-	
+
 	/// This is triggered by a message coming from a block queue when the block is ready for insertion
 	pub fn import_verified_blocks(&self, io: &IoChannel<NetSyncMessage>) -> usize {
 		let max_blocks_to_import = 128;
@@ -286,6 +311,8 @@ impl<V> Client<V> where V: Verifier {
 			// Commit results
 			let closed_block = closed_block.unwrap();
 			let receipts = closed_block.block().receipts().clone();
+			let traces = From::from(closed_block.block().traces().clone().unwrap_or_else(Vec::new));
+
 			closed_block.drain()
 				.commit(header.number(), &header.hash(), ancient)
 				.expect("State DB commit failed.");
@@ -293,6 +320,14 @@ impl<V> Client<V> where V: Verifier {
 			// And update the chain after commit to prevent race conditions
 			// (when something is in chain but you are not able to fetch details)
 			let route = self.chain.insert_block(&block.bytes, receipts);
+			self.tracedb.import(TraceImportRequest {
+				traces: traces,
+				block_hash: header.hash(),
+				block_number: header.number(),
+				enacted: route.enacted.clone(),
+				retracted: route.retracted.len()
+			});
+
 			import_results.push(route);
 
 			self.report.write().unwrap().accrue_block(&block);
@@ -334,7 +369,7 @@ impl<V> Client<V> where V: Verifier {
 
 	/// Get a copy of the best block's state.
 	pub fn state(&self) -> State {
-		State::from_existing(self.state_db.lock().unwrap().spawn(), HeaderView::new(&self.best_block_header()).state_root(), self.engine.account_start_nonce())
+		State::from_existing(self.state_db.lock().unwrap().boxed_clone(), HeaderView::new(&self.best_block_header()).state_root(), self.engine.account_start_nonce())
 	}
 
 	/// Get info on the cache.
@@ -377,27 +412,67 @@ impl<V> Client<V> where V: Verifier {
 			BlockId::Latest => Some(self.chain.best_block_number())
 		}
 	}
+
+	fn transaction_address(&self, id: TransactionId) -> Option<TransactionAddress> {
+		match id {
+			TransactionId::Hash(ref hash) => self.chain.transaction_address(hash),
+			TransactionId::Location(id, index) => Self::block_hash(&self.chain, id).map(|hash| TransactionAddress {
+				block_hash: hash,
+				index: index
+			})
+		}
+	}
 }
 
 impl<V> BlockChainClient for Client<V> where V: Verifier {
-
-
-	// TODO [todr] Should be moved to miner crate eventually.
-	fn try_seal(&self, block: ClosedBlock, seal: Vec<Bytes>) -> Result<SealedBlock, ClosedBlock> {
-		block.try_seal(self.engine.deref().deref(), seal)
+	fn call(&self, t: &SignedTransaction) -> Result<Executed, Error> {
+		let header = self.block_header(BlockId::Latest).unwrap();
+		let view = HeaderView::new(&header);
+		let last_hashes = self.build_last_hashes(view.hash());
+		let env_info = EnvInfo {
+			number: view.number(),
+			author: view.author(),
+			timestamp: view.timestamp(),
+			difficulty: view.difficulty(),
+			last_hashes: last_hashes,
+			gas_used: U256::zero(),
+			gas_limit: U256::max_value(),
+		};
+		// that's just a copy of the state.
+		let mut state = self.state();
+		let sender = try!(t.sender());
+		let balance = state.balance(&sender);
+		// give the sender max balance
+		state.sub_balance(&sender, &balance);
+		state.add_balance(&sender, &U256::max_value());
+		let options = TransactOptions { tracing: false, check_nonce: false };
+		Executive::new(&mut state, &env_info, self.engine.deref().deref()).transact(t, options)
 	}
 
 	// TODO [todr] Should be moved to miner crate eventually.
-	fn prepare_sealing(&self, author: Address, extra_data: Bytes, transactions: Vec<SignedTransaction>) -> Option<ClosedBlock> {
+	fn try_seal(&self, block: LockedBlock, seal: Vec<Bytes>) -> Result<SealedBlock, LockedBlock> {
+		block.try_seal(self.engine.deref().deref(), seal)
+	}
+
+	fn engine(&self) -> &Engine {
+		self.engine.deref().deref()
+	}
+
+	// TODO [todr] Should be moved to miner crate eventually.
+	fn prepare_sealing(&self, author: Address, gas_floor_target: U256, extra_data: Bytes, transactions: Vec<SignedTransaction>)
+		-> (Option<ClosedBlock>, HashSet<H256>) {
 		let engine = self.engine.deref().deref();
 		let h = self.chain.best_block_hash();
+		let mut invalid_transactions = HashSet::new();
 
 		let mut b = OpenBlock::new(
 			engine,
-			self.state_db.lock().unwrap().spawn(),
-			match self.chain.block_header(&h) { Some(ref x) => x, None => {return None} },
+			false,	// TODO: this will need to be parameterised once we want to do immediate mining insertion.
+			self.state_db.lock().unwrap().boxed_clone(),
+			match self.chain.block_header(&h) { Some(ref x) => x, None => { return (None, invalid_transactions) } },
 			self.build_last_hashes(h.clone()),
 			author,
+			gas_floor_target,
 			extra_data,
 		);
 
@@ -413,21 +488,39 @@ impl<V> BlockChainClient for Client<V> where V: Verifier {
 
 		// Add transactions
 		let block_number = b.block().header().number();
+		let min_tx_gas = U256::from(self.engine.schedule(&b.env_info()).tx_gas);
+
 		for tx in transactions {
+			// Push transaction to block
+			let hash = tx.hash();
 			let import = b.push_transaction(tx, None);
-			if let Err(e) = import {
-				trace!("Error adding transaction to block: number={}. Error: {:?}", block_number, e);
+
+			match import {
+				Err(Error::Execution(ExecutionError::BlockGasLimitReached { gas_limit, gas_used, .. })) => {
+					trace!(target: "miner", "Skipping adding transaction to block because of gas limit: {:?}", hash);
+					// Exit early if gas left is smaller then min_tx_gas
+					if gas_limit - gas_used < min_tx_gas {
+						break;
+					}
+				},
+				Err(e) => {
+					invalid_transactions.insert(hash);
+					trace!(target: "miner",
+						   "Error adding transaction to block: number={}. transaction_hash={:?}, Error: {:?}",
+						   block_number, hash, e);
+				},
+				_ => {}
 			}
 		}
 
 		// And close
 		let b = b.close();
-		trace!("Sealing: number={}, hash={}, diff={}",
+		trace!(target: "miner", "Sealing: number={}, hash={}, diff={}",
 			   b.block().header().number(),
 			   b.hash(),
 			   b.block().header().difficulty()
 		);
-		Some(b)
+		(Some(b), invalid_transactions)
 	}
 
 	fn block_header(&self, id: BlockId) -> Option<Bytes> {
@@ -485,13 +578,50 @@ impl<V> BlockChainClient for Client<V> where V: Verifier {
 	}
 
 	fn transaction(&self, id: TransactionId) -> Option<LocalizedTransaction> {
-		match id {
-			TransactionId::Hash(ref hash) => self.chain.transaction_address(hash),
-			TransactionId::Location(id, index) => Self::block_hash(&self.chain, id).map(|hash| TransactionAddress {
-				block_hash: hash,
-				index: index
-			})
-		}.and_then(|address| self.chain.transaction(&address))
+		self.transaction_address(id).and_then(|address| self.chain.transaction(&address))
+	}
+
+	fn uncle(&self, id: UncleId) -> Option<Header> {
+		let index = id.1;
+		self.block(id.0).and_then(|block| BlockView::new(&block).uncle_at(index))
+	}
+
+	fn transaction_receipt(&self, id: TransactionId) -> Option<LocalizedReceipt> {
+		self.transaction_address(id).and_then(|address| {
+			let t = self.chain.block(&address.block_hash)
+				.and_then(|block| BlockView::new(&block).localized_transaction_at(address.index));
+
+			match (t, self.chain.transaction_receipt(&address)) {
+				(Some(tx), Some(receipt)) => {
+					let block_hash = tx.block_hash.clone();
+					let block_number = tx.block_number.clone();
+					let transaction_hash = tx.hash();
+					let transaction_index = tx.transaction_index;
+					Some(LocalizedReceipt {
+						transaction_hash: tx.hash(),
+						transaction_index: tx.transaction_index,
+						block_hash: tx.block_hash,
+						block_number: tx.block_number,
+						// TODO: to fix this, query all previous transaction receipts and retrieve their gas usage
+						cumulative_gas_used: receipt.gas_used,
+						gas_used: receipt.gas_used,
+						contract_address: match tx.action {
+							Action::Call(_) => None,
+							Action::Create => Some(contract_address(&tx.sender().unwrap(), &tx.nonce))
+						},
+						logs: receipt.logs.into_iter().enumerate().map(|(i, log)| LocalizedLogEntry {
+							entry: log,
+							block_hash: block_hash.clone(),
+							block_number: block_number,
+							transaction_hash: transaction_hash.clone(),
+							transaction_index: transaction_index,
+							log_index: i
+						}).collect()
+					})
+				},
+				_ => None
+			}
+		})
 	}
 
 	fn tree_route(&self, from: &H256, to: &H256) -> Option<TreeRoute> {
@@ -501,12 +631,12 @@ impl<V> BlockChainClient for Client<V> where V: Verifier {
 		}
 	}
 
-	fn state_data(&self, _hash: &H256) -> Option<Bytes> {
-		None
+	fn state_data(&self, hash: &H256) -> Option<Bytes> {
+		self.state_db.lock().unwrap().state(hash)
 	}
 
-	fn block_receipts(&self, _hash: &H256) -> Option<Bytes> {
-		None
+	fn block_receipts(&self, hash: &H256) -> Option<Bytes> {
+		self.chain.block_receipts(hash).map(|receipts| rlp::encode(&receipts).to_vec())
 	}
 
 	fn import_block(&self, bytes: Bytes) -> ImportResult {
@@ -576,7 +706,7 @@ impl<V> BlockChainClient for Client<V> where V: Verifier {
 						 	.map(|(i, log)| LocalizedLogEntry {
 							 	entry: log,
 								block_hash: hash.clone(),
-								block_number: number as usize,
+								block_number: number,
 								transaction_hash: hashes.get(index).cloned().unwrap_or_else(H256::new),
 								transaction_index: index,
 								log_index: log_index + i
@@ -587,6 +717,50 @@ impl<V> BlockChainClient for Client<V> where V: Verifier {
 
 			})
 			.collect()
+	}
+
+	fn filter_traces(&self, filter: TraceFilter) -> Option<Vec<LocalizedTrace>> {
+		let start = self.block_number(filter.range.start);
+		let end = self.block_number(filter.range.end);
+
+		if start.is_some() && end.is_some() {
+			let filter = trace::Filter {
+				range: start.unwrap() as usize..end.unwrap() as usize,
+				from_address: From::from(filter.from_address),
+				to_address: From::from(filter.to_address),
+			};
+
+			let traces = self.tracedb.filter(&filter);
+			Some(traces)
+		} else {
+			None
+		}
+	}
+
+	fn trace(&self, trace: TraceId) -> Option<LocalizedTrace> {
+		let trace_address = trace.address;
+		self.transaction_address(trace.transaction)
+			.and_then(|tx_address| {
+				self.block_number(BlockId::Hash(tx_address.block_hash))
+					.and_then(|number| self.tracedb.trace(number, tx_address.index, trace_address))
+			})
+	}
+
+	fn transaction_traces(&self, transaction: TransactionId) -> Option<Vec<LocalizedTrace>> {
+		self.transaction_address(transaction)
+			.and_then(|tx_address| {
+				self.block_number(BlockId::Hash(tx_address.block_hash))
+					.and_then(|number| self.tracedb.transaction_traces(number, tx_address.index))
+			})
+	}
+
+	fn block_traces(&self, block: BlockId) -> Option<Vec<LocalizedTrace>> {
+		self.block_number(block)
+			.and_then(|number| self.tracedb.block_traces(number))
+	}
+
+	fn last_hashes(&self) -> LastHashes {
+		self.build_last_hashes(self.chain.best_block_hash())
 	}
 }
 

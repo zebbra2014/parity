@@ -19,12 +19,13 @@ First (if you don't already have it) get multirust:
 
 - Linux:
 ```bash
-curl -sf https://raw.githubusercontent.com/brson/multirust/master/quick-install.sh | sudo sh -s -- --yes
+curl -sf https://raw.githubusercontent.com/brson/multirust/master/quick-install.sh | sh
 ```
 
 - OSX with Homebrew:
 ```bash
 brew update && brew install multirust
+multirust default stable
 ```
 
 Then, download and build Parity:

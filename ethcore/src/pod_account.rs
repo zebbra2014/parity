@@ -17,8 +17,9 @@
 use util::*;
 use account::*;
 use account_db::*;
+use ethjson;
 
-#[derive(Debug,Clone,PartialEq,Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 /// An account, expressed as Plain-Old-Data (hence the name).
 /// Does not have a DB overlay cache, code hash or anything like that.
 pub struct PodAccount {
@@ -69,6 +70,32 @@ impl PodAccount {
 		let mut t = SecTrieDBMut::new(db, &mut r);
 		for (k, v) in &self.storage {
 			t.insert(k, &encode(&U256::from(v.as_slice())));
+		}
+	}
+}
+
+impl From<ethjson::blockchain::Account> for PodAccount {
+	fn from(a: ethjson::blockchain::Account) -> Self {
+		PodAccount {
+			balance: a.balance.into(),
+			nonce: a.nonce.into(),
+			code: a.code.into(),
+			storage: a.storage.into_iter().map(|(key, value)| {
+				let key: U256 = key.into();
+				let value: U256 = value.into();
+				(H256::from(key), H256::from(value))
+			}).collect()
+		}
+	}
+}
+
+impl From<ethjson::spec::Account> for PodAccount {
+	fn from(a: ethjson::spec::Account) -> Self {
+		PodAccount {
+			balance: a.balance.map_or_else(U256::zero, Into::into),
+			nonce: a.nonce.map_or_else(U256::zero, Into::into),
+			code: vec![],
+			storage: BTreeMap::new()
 		}
 	}
 }

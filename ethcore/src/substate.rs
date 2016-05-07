@@ -19,32 +19,29 @@ use common::*;
 
 /// State changes which should be applied in finalize,
 /// after transaction is fully executed.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Substate {
 	/// Any accounts that have suicided.
 	pub suicides: HashSet<Address>,
+
 	/// Any logs.
 	pub logs: Vec<LogEntry>,
+
 	/// Refund counter of SSTORE nonzero -> zero.
 	pub sstore_clears_count: U256,
-	/// Created contracts.
-	pub contracts_created: Vec<Address>
-}
 
-impl Default for Substate {
-	fn default() -> Self {
-		Substate::new()
-	}
+	/// Created contracts.
+	pub contracts_created: Vec<Address>,
 }
 
 impl Substate {
 	/// Creates new substate.
 	pub fn new() -> Self {
 		Substate {
-			suicides: HashSet::new(),
-			logs: vec![],
-			sstore_clears_count: U256::zero(),
-			contracts_created: vec![]
+			suicides: Default::default(),
+			logs: Default::default(),
+			sstore_clears_count: Default::default(),
+			contracts_created: Default::default(),
 		}
 	}
 

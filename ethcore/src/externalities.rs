@@ -21,14 +21,15 @@ use engine::*;
 use executive::*;
 use evm::{self, Schedule, Ext, ContractCreateResult, MessageCallResult};
 use substate::*;
+use trace::Tracer;
 
 /// Policy for handling output data on `RETURN` opcode.
-pub enum OutputPolicy<'a> {
+pub enum OutputPolicy<'a, 'b> {
 	/// Return reference to fixed sized output.
 	/// Used for message calls.
-	Return(BytesRef<'a>),
+	Return(BytesRef<'a>, Option<&'b mut Bytes>),
 	/// Init new contract as soon as `RETURN` is called.
-	InitContract
+	InitContract(Option<&'b mut Bytes>),
 }
 
 /// Transaction properties that externalities need to know about.
@@ -54,7 +55,7 @@ impl OriginInfo {
 }
 
 /// Implementation of evm Externalities.
-pub struct Externalities<'a> {
+pub struct Externalities<'a, T> where T: 'a + Tracer {
 	state: &'a mut State,
 	env_info: &'a EnvInfo,
 	engine: &'a Engine,
@@ -62,18 +63,23 @@ pub struct Externalities<'a> {
 	origin_info: OriginInfo,
 	substate: &'a mut Substate,
 	schedule: Schedule,
-	output: OutputPolicy<'a>
+	output: OutputPolicy<'a, 'a>,
+	tracer: &'a mut T,
 }
 
-impl<'a> Externalities<'a> {
+impl<'a, T> Externalities<'a, T> where T: 'a + Tracer {
+
+	#[cfg_attr(feature="dev", allow(too_many_arguments))]
 	/// Basic `Externalities` constructor.
 	pub fn new(state: &'a mut State,
-			   env_info: &'a EnvInfo,
-			   engine: &'a Engine,
-			   depth: usize,
-			   origin_info: OriginInfo,
-			   substate: &'a mut Substate,
-			   output: OutputPolicy<'a>) -> Self {
+		env_info: &'a EnvInfo,
+		engine: &'a Engine,
+		depth: usize,
+		origin_info: OriginInfo,
+		substate: &'a mut Substate,
+		output: OutputPolicy<'a, 'a>,
+		tracer: &'a mut T,
+	) -> Self {
 		Externalities {
 			state: state,
 			env_info: env_info,
@@ -82,12 +88,13 @@ impl<'a> Externalities<'a> {
 			origin_info: origin_info,
 			substate: substate,
 			schedule: engine.schedule(env_info),
-			output: output
+			output: output,
+			tracer: tracer,
 		}
 	}
 }
 
-impl<'a> Ext for Externalities<'a> {
+impl<'a, T> Ext for Externalities<'a, T> where T: 'a + Tracer {
 	fn storage_at(&self, key: &H256) -> H256 {
 		self.state.storage_at(&self.origin_info.address, key)
 	}
@@ -142,7 +149,7 @@ impl<'a> Ext for Externalities<'a> {
 		let mut ex = Executive::from_parent(self.state, self.env_info, self.engine, self.depth);
 
 		// TODO: handle internal error separately
-		match ex.create(params, self.substate) {
+		match ex.create(params, self.substate, self.tracer) {
 			Ok(gas_left) => {
 				self.substate.contracts_created.push(address.clone());
 				ContractCreateResult::Created(address, gas_left)
@@ -152,13 +159,15 @@ impl<'a> Ext for Externalities<'a> {
 	}
 
 	fn call(&mut self,
-			gas: &U256,
-			sender_address: &Address,
-			receive_address: &Address,
-			value: Option<U256>,
-			data: &[u8],
-			code_address: &Address,
-			output: &mut [u8]) -> MessageCallResult {
+		gas: &U256,
+		sender_address: &Address,
+		receive_address: &Address,
+		value: Option<U256>,
+		data: &[u8],
+		code_address: &Address,
+		output: &mut [u8]
+	) -> MessageCallResult {
+		trace!(target: "externalities", "call");
 
 		let mut params = ActionParams {
 			sender: sender_address.clone(),
@@ -178,7 +187,7 @@ impl<'a> Ext for Externalities<'a> {
 
 		let mut ex = Executive::from_parent(self.state, self.env_info, self.engine, self.depth);
 
-		match ex.call(params, self.substate, BytesRef::Fixed(output)) {
+		match ex.call(params, self.substate, BytesRef::Fixed(output), self.tracer) {
 			Ok(gas_left) => MessageCallResult::Success(gas_left),
 			_ => MessageCallResult::Failed
 		}
@@ -190,20 +199,31 @@ impl<'a> Ext for Externalities<'a> {
 
 	#[cfg_attr(feature="dev", allow(match_ref_pats))]
 	fn ret(&mut self, gas: &U256, data: &[u8]) -> Result<U256, evm::Error> {
-		match &mut self.output {
-			&mut OutputPolicy::Return(BytesRef::Fixed(ref mut slice)) => unsafe {
+		let handle_copy = |to: &mut Option<&mut Bytes>| {
+			to.as_mut().map(|b| **b = data.to_owned());
+		};
+		match self.output {
+			OutputPolicy::Return(BytesRef::Fixed(ref mut slice), ref mut copy) => {
+				handle_copy(copy);
+
 				let len = cmp::min(slice.len(), data.len());
-				ptr::copy(data.as_ptr(), slice.as_mut_ptr(), len);
+				unsafe {
+					ptr::copy(data.as_ptr(), slice.as_mut_ptr(), len);
+				}
 				Ok(*gas)
 			},
-			&mut OutputPolicy::Return(BytesRef::Flexible(ref mut vec)) => unsafe {
+			OutputPolicy::Return(BytesRef::Flexible(ref mut vec), ref mut copy) => {
+				handle_copy(copy);
+
 				vec.clear();
 				vec.reserve(data.len());
-				ptr::copy(data.as_ptr(), vec.as_mut_ptr(), data.len());
-				vec.set_len(data.len());
+				unsafe {
+					ptr::copy(data.as_ptr(), vec.as_mut_ptr(), data.len());
+					vec.set_len(data.len());
+				}
 				Ok(*gas)
 			},
-			&mut OutputPolicy::InitContract => {
+			OutputPolicy::InitContract(ref mut copy) => {
 				let return_cost = U256::from(data.len()) * U256::from(self.schedule.create_data_gas);
 				if return_cost > *gas {
 					return match self.schedule.exceptional_failed_code_deposit {
@@ -211,14 +231,16 @@ impl<'a> Ext for Externalities<'a> {
 						false => Ok(*gas)
 					}
 				}
+
+				handle_copy(copy);
+
 				let mut code = vec![];
 				code.reserve(data.len());
 				unsafe {
 					ptr::copy(data.as_ptr(), code.as_mut_ptr(), data.len());
 					code.set_len(data.len());
 				}
-				let address = &self.origin_info.address;
-				self.state.init_code(address, code);
+				self.state.init_code(&self.origin_info.address, code);
 				Ok(*gas - return_cost)
 			}
 		}
@@ -272,6 +294,7 @@ mod tests {
 	use substate::*;
 	use tests::helpers::*;
 	use super::*;
+	use trace::{NoopTracer};
 
 	fn get_test_origin() -> OriginInfo {
 		OriginInfo {
@@ -311,7 +334,7 @@ mod tests {
 		fn new() -> Self {
 			TestSetup {
 				state: get_temp_state(),
-				engine: get_test_spec().to_engine().unwrap(),
+				engine: get_test_spec().engine,
 				sub_state: Substate::new(),
 				env_info: get_test_env_info()
 			}
@@ -322,8 +345,9 @@ mod tests {
 	fn can_be_created() {
 		let mut setup = TestSetup::new();
 		let state = setup.state.reference_mut();
+		let mut tracer = NoopTracer;
 
-		let ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract);
+		let ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract(None), &mut tracer);
 
 		assert_eq!(ext.env_info().number, 100);
 	}
@@ -332,7 +356,9 @@ mod tests {
 	fn can_return_block_hash_no_env() {
 		let mut setup = TestSetup::new();
 		let state = setup.state.reference_mut();
-		let ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract);
+		let mut tracer = NoopTracer;
+
+		let ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract(None), &mut tracer);
 
 		let hash = ext.blockhash(&U256::from_str("0000000000000000000000000000000000000000000000000000000000120000").unwrap());
 
@@ -351,7 +377,9 @@ mod tests {
 			env_info.last_hashes.push(test_hash.clone());
 		}
 		let state = setup.state.reference_mut();
-		let ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract);
+		let mut tracer = NoopTracer;
+
+		let ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract(None), &mut tracer);
 
 		let hash = ext.blockhash(&U256::from_str("0000000000000000000000000000000000000000000000000000000000120000").unwrap());
 
@@ -363,7 +391,9 @@ mod tests {
 	fn can_call_fail_empty() {
 		let mut setup = TestSetup::new();
 		let state = setup.state.reference_mut();
-		let mut ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract);
+		let mut tracer = NoopTracer;
+
+		let mut ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract(None), &mut tracer);
 
 		let mut output = vec![];
 
@@ -385,9 +415,10 @@ mod tests {
 
 		let mut setup = TestSetup::new();
 		let state = setup.state.reference_mut();
+		let mut tracer = NoopTracer;
 
 		{
-			let mut ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract);
+			let mut ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract(None), &mut tracer);
 			ext.log(log_topics, &log_data);
 		}
 
@@ -400,9 +431,10 @@ mod tests {
 
 		let mut setup = TestSetup::new();
 		let state = setup.state.reference_mut();
+		let mut tracer = NoopTracer;
 
 		{
-			let mut ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract);
+			let mut ext = Externalities::new(state, &setup.env_info, &*setup.engine, 0, get_test_origin(), &mut setup.sub_state, OutputPolicy::InitContract(None), &mut tracer);
 			ext.suicide(&refund_account);
 		}
 

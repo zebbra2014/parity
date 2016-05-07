@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-PARITY_DEB_URL=https://github.com/ethcore/parity/releases/download/beta-0.9/parity_linux_0.9.0-0_amd64.deb
+PARITY_DEB_URL=https://github.com/ethcore/parity/releases/download/v1.0.2/parity_linux_1.0.2-0_amd64.deb
 
 
 function run_installer()
@@ -435,13 +435,8 @@ function run_installer()
 		echo
 
 		info "Installing parity"
-		if [[ $isEth == true ]]
-		then
-			brew reinstall parity
-		else
-			brew install parity
-			brew linkapps parity
-		fi
+		brew reinstall parity
+		brew linkapps parity
 		echo
 	}
 	
@@ -497,9 +492,6 @@ function run_installer()
 		[ ! -d "www" ] && git clone https://github.com/cubedro/eth-net-intelligence-api netstats
 		oldpwd= $(pwd)
 		cd netstats
-		git pull
-		git checkout 95d595258239a0fdf56b97dedcfb2be62f6170e6
-
 		sudo npm install
 		sudo npm install pm2 -g
 
