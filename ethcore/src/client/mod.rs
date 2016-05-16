@@ -123,7 +123,7 @@ pub trait BlockChainClient : Sync + Send {
 	// TODO [todr] Should be moved to miner crate eventually.
 	/// Returns ClosedBlock prepared for sealing.
 	fn prepare_sealing(&self, author: Address, gas_floor_target: U256, extra_data: Bytes, transactions: Vec<SignedTransaction>)
-		-> (Option<ClosedBlock>, HashSet<H256>);
+		-> SealingResult;
 
 	// TODO [todr] Should be moved to miner crate eventually.
 	/// Attempts to seal given block. Returns `SealedBlock` on success and the same block in case of error.

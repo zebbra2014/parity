@@ -14,13 +14,16 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-pub mod transaction;
-pub mod ids;
-pub mod receipt;
-pub mod tree_route;
-pub mod blockchain_info;
-pub mod log_entry;
-pub mod trace_types;
-pub mod executed;
-pub mod block_status;
-pub mod sealing_result;
+//! Block sealing result module
+
+use ipc::binary::BinaryConvertError;
+use std::collections::{VecDeque, HashSet};
+use block::ClosedBlock;
+use util::numbers::*;
+use std::mem;
+
+#[derive(Binary)]
+pub struct SealingResult {
+	pub block: Option<ClosedBlock>,
+	pub invalid_transactions: HashSet<H256>,
+}
