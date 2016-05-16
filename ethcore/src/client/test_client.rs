@@ -33,6 +33,7 @@ use block::{SealedBlock, ClosedBlock, LockedBlock};
 use executive::Executed;
 use error::{ExecutionError};
 use trace::LocalizedTrace;
+use types::sealing_result::SealingResult;
 
 /// Test client.
 pub struct TestBlockChainClient {
@@ -272,8 +273,11 @@ impl BlockChainClient for TestBlockChainClient {
 		unimplemented!();
 	}
 
-	fn prepare_sealing(&self, _author: Address, _gas_floor_target: U256, _extra_data: Bytes, _transactions: Vec<SignedTransaction>) -> (Option<ClosedBlock>, HashSet<H256>) {
-		(None, HashSet::new())
+	fn prepare_sealing(&self, _author: Address, _gas_floor_target: U256, _extra_data: Bytes, _transactions: Vec<SignedTransaction>) -> SealingResult {
+		SealingResult {
+			block: None,
+			invalid_transactions: HashSet::new()
+		}
 	}
 
 	fn try_seal(&self, block: LockedBlock, _seal: Vec<Bytes>) -> Result<SealedBlock, LockedBlock> {

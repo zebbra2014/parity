@@ -45,7 +45,7 @@ use receipt::LocalizedReceipt;
 use trace::LocalizedTrace;
 
 /// Blockchain database client. Owns and manages a blockchain and a block queue.
-pub trait BlockChainClient : Sync + Send {
+pub trait BlockChainClient {
 	/// Get raw block header data by block id.
 	fn block_header(&self, id: BlockId) -> Option<Bytes>;
 

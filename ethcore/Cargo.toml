@@ -29,6 +29,7 @@ ethcore-devtools = { path = "../devtools" }
 ethjson = { path = "../json" }
 bloomchain = "0.1"
 "ethcore-ipc" = { path = "../ipc/rpc" }
+semver = "0.2"
 
 [features]
 jit = ["evmjit"]
