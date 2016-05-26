@@ -47,6 +47,7 @@ pub fn all_endpoints() -> Endpoints {
 	wallet_page(&mut pages);
 	daodapp_page(&mut pages);
 	makerotc_page(&mut pages);
+	augur_page(&mut pages);
 	pages
 }
 
@@ -73,6 +74,14 @@ fn makerotc_page(pages: &mut Endpoints) {
 }
 #[cfg(not(feature = "parity-dapps-makerotc"))]
 fn makerotc_page(_pages: &mut Endpoints) {}
+
+#[cfg(feature = "parity-dapps-augur")]
+fn augur_page(pages: &mut Endpoints) {
+	extern crate parity_dapps_augur;
+	insert::<parity_dapps_augur::App>(pages, "augur");
+}
+#[cfg(not(feature = "parity-dapps-augur"))]
+fn augur_page(_pages: &mut Endpoints) {}
 
 fn insert<T : WebApp + Default + 'static>(pages: &mut Endpoints, id: &str) {
 	pages.insert(id.to_owned(), Box::new(PageEndpoint::new(T::default())));

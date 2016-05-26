@@ -267,6 +267,7 @@ dependencies = [
  "jsonrpc-http-server 5.1.0 (git+https://github.com/ethcore/jsonrpc-http-server.git)",
  "log 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "parity-dapps 0.3.0 (git+https://github.com/ethcore/parity-dapps-rs.git)",
+ "parity-dapps-augur 0.1.0",
  "parity-dapps-builtins 0.5.0 (git+https://github.com/ethcore/parity-dapps-builtins-rs.git)",
  "parity-dapps-dao 0.3.0 (git+https://github.com/ethcore/parity-dapps-dao-rs.git)",
  "parity-dapps-makerotc 0.2.0 (git+https://github.com/ethcore/parity-dapps-makerotc-rs.git)",
@@ -865,6 +866,13 @@ dependencies = [
  "quasi_codegen 0.10.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "syntex 0.32.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "syntex_syntax 0.32.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "parity-dapps-augur"
+version = "0.1.0"
+dependencies = [
+ "parity-dapps 0.3.0 (git+https://github.com/ethcore/parity-dapps-rs.git)",
 ]
 
 [[package]]
