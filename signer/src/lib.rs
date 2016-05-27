@@ -14,22 +14,28 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Blockchain database.
+#![warn(missing_docs)]
+#![cfg_attr(all(nightly, feature="dev"), feature(plugin))]
+#![cfg_attr(all(nightly, feature="dev"), plugin(clippy))]
 
-mod best_block;
-mod block_info;
-pub mod blockchain;
-mod cache;
-mod config;
-pub mod extras;
-mod import_route;
-mod update;
+//! Signer module
+//!
+//! This module manages your private keys and accounts/identities
+//! that can be used within Dapps.
+//!
+//! It exposes API (over `WebSockets`) accessed by System UIs.
+//! Each transaction sent by Dapp is broadcasted to System UIs
+//! and their responsibility is to confirm (or confirm and sign)
+//! the transaction for you.
+//!
+//!
+
+#[macro_use]
+extern crate log;
+extern crate env_logger;
 
 #[cfg(test)]
-mod generator;
-
-pub use self::blockchain::{BlockProvider, BlockChain};
-pub use self::cache::CacheSize;
-pub use self::config::Config;
-pub use types::tree_route::TreeRoute;
-pub use self::import_route::ImportRoute;
+mod tests {
+	#[test]
+	fn should_work() {}
+}

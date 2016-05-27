@@ -14,22 +14,12 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Blockchain database.
+//! Bridge between bloomchain crate types and ethcore.
 
-mod best_block;
-mod block_info;
-pub mod blockchain;
-mod cache;
-mod config;
-pub mod extras;
-mod import_route;
-mod update;
+mod bloom;
+mod bloom_group;
+mod group_position;
 
-#[cfg(test)]
-mod generator;
-
-pub use self::blockchain::{BlockProvider, BlockChain};
-pub use self::cache::CacheSize;
-pub use self::config::Config;
-pub use types::tree_route::TreeRoute;
-pub use self::import_route::ImportRoute;
+pub use self::bloom::Bloom;
+pub use self::bloom_group::BloomGroup;
+pub use self::group_position::GroupPosition;

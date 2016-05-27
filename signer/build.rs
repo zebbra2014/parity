@@ -14,27 +14,12 @@
 // You should have received a copy of the GNU General Public License
 // along with Parity.  If not, see <http://www.gnu.org/licenses/>.
 
-//! Represents bloom index in cache
+extern crate rustc_version;
 
-/// Represents bloom index in cache
-/// 
-/// On cache level 0, every block bloom is represented by different index.
-/// On higher cache levels, multiple block blooms are represented by one
-/// index. Their `BloomIndex` can be created from block number and given level.
-#[derive(Eq, PartialEq, Hash, Clone, Debug)]
-pub struct BloomIndex {
-	/// Bloom level
-	pub level: u8,
-	///  Filter Index
-	pub index: usize,
-}
+use rustc_version::{version_meta, Channel};
 
-impl BloomIndex {
-	/// Default constructor for `BloomIndex`
-	pub fn new(level: u8, index: usize) -> BloomIndex {
-		BloomIndex {
-			level: level,
-			index: index,
-		}
+fn main() {
+	if let Channel::Nightly = version_meta().channel {
+		println!("cargo:rustc-cfg=nightly");
 	}
 }
