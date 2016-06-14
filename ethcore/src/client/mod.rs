@@ -31,6 +31,7 @@ pub use self::trace::Filter as TraceFilter;
 pub use executive::{Executed, Executive, TransactOptions};
 pub use env_info::{LastHashes, EnvInfo};
 
+use std::path::Path;
 use util::bytes::Bytes;
 use util::hash::{Address, H256, H2048};
 use util::numbers::U256;
@@ -193,6 +194,10 @@ pub trait BlockChainClient : Sync + Send {
 
 	/// list all transactions
 	fn all_transactions(&self) -> Vec<SignedTransaction>;
+
+	/// Generate a PV64 snapshot for the current best block, saving it within the
+	/// root directory, whose path is given.
+	fn take_snapshot(&self, root_dir: &Path);
 }
 
 /// Extended client interface used for mining

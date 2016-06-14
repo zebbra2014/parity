@@ -17,6 +17,7 @@
 //! Blockchain database client.
 
 use std::marker::PhantomData;
+use std::fs::{create_dir, File};
 use std::path::PathBuf;
 use util::*;
 use util::panics::*;
@@ -103,7 +104,7 @@ const HISTORY: u64 = 1200;
 const CLIENT_DB_VER_STR: &'static str = "5.3";
 
 impl Client<CanonVerifier> {
-	/// Create a new client with given spec and DB path.
+	/// Create a new client with given spec and root path.
 	pub fn new(config: ClientConfig, spec: Spec, path: &Path, miner: Arc<Miner>, message_channel: IoChannel<NetSyncMessage> ) -> Result<Arc<Client>, ClientError> {
 		Client::<CanonVerifier>::new_with_verifier(config, spec, path, miner, message_channel)
 	}
@@ -127,7 +128,7 @@ pub fn append_path(path: &Path, item: &str) -> String {
 }
 
 impl<V> Client<V> where V: Verifier {
-	///  Create a new client with given spec and DB path and custom verifier.
+	///  Create a new client with given spec and root path and custom verifier.
 	pub fn new_with_verifier(
 		config: ClientConfig,
 		spec: Spec,
@@ -752,6 +753,42 @@ impl<V> BlockChainClient for Client<V> where V: Verifier {
 
 	fn all_transactions(&self) -> Vec<SignedTransaction> {
 		self.miner.all_transactions()
+	}
+
+	fn take_snapshot(&self, root_dir: &Path) {
+		use snapshot::{ManifestData, chunk_blocks, chunk_state};
+
+		let best_header_bytes = self.best_block_header();
+		let best_header = HeaderView::new(&best_header_bytes);
+		let state_root = best_header.state_root();
+
+		trace!(target: "snapshot", "Taking snapshot starting at block {}", best_header.number());
+
+		let mut path = root_dir.to_owned();
+		path.push("snapshot/");
+		let _ = create_dir(&path);
+
+		// lock the state db while we create the state chunks.
+		let state_hashes = {
+			let state_db = self.state_db.lock().unwrap().boxed_clone();
+			chunk_state(state_db.as_hashdb(), &state_root, &path).unwrap()
+		};
+
+		let best_hash = best_header.hash();
+		let genesis_hash = self.chain.genesis_hash();
+
+		let block_chunk_hashes = chunk_blocks(self, best_hash, genesis_hash, &path).unwrap();
+
+		let manifest_data = ManifestData {
+			state_hashes: state_hashes,
+			block_hashes: block_chunk_hashes,
+			state_root: state_root,
+		};
+
+		path.push("MANIFEST");
+
+		let mut manifest_file = File::create(&path).unwrap();
+		manifest_file.write_all(&manifest_data.to_rlp()).unwrap();
 	}
 }
 

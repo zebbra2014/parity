@@ -111,6 +111,7 @@ pub mod pod_state;
 pub mod engine;
 pub mod migrations;
 pub mod miner;
+pub mod snapshot;
 
 mod blooms;
 mod db;
