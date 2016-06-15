@@ -16,9 +16,6 @@
 
 //! Snapshot creation helpers.
 
-// Try to have chunks be around 16MB (before compression)
-const PREFERRED_CHUNK_SIZE: usize = 16 * 1024 * 1024;
-
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
@@ -34,32 +31,74 @@ use util::{Bytes, Hashable, HashDB, TrieDB};
 use util::hash::{FixedHash, H256};
 use util::numbers::U256;
 use util::rlp::{DecoderError, Rlp, RlpStream, Stream, SHA3_NULL_RLP, UntrustedRlp, View};
+use util::snappy;
+
+use self::block::AbridgedBlock;
+
+mod block;
+
+// Try to have chunks be around 16MB (before compression)
+const PREFERRED_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+// compresses the data into the buffer, resizing if necessary.
+fn compression_helper(input: &[u8], output: &mut Vec<u8>) -> usize {
+	let max_size = snappy::max_compressed_len(input.len());
+	let buf_len = output.len();
+
+	// resize if necessary, but in reality this will probably never happen.
+	if max_size > buf_len {
+		output.resize(max_size, 0);
+	}
+
+	match snappy::compress_into(&input, output) {
+		Ok(size) => size,
+		Err(snappy::Error::BufferTooSmall) => panic!("buffer too small although capacity ensured?"),
+		Err(snappy::Error::InvalidInput) => panic!("invalid input error impossible in snappy_compress"),
+	}
+}
+
+// shared portion of write_chunk
+// returns either a (hash, compressed_size) pair or an io error.
+fn write_chunk(raw_data: &[u8], compression_buffer: &mut Vec<u8>, path: &Path) -> Result<(H256, usize), Error> {
+	let compressed_size = compression_helper(raw_data, compression_buffer);
+	let compressed = &compression_buffer[..compressed_size];
+	let hash = compressed.sha3();
+
+	let mut file_path = path.to_owned();
+	file_path.push(hash.hex());
+
+	let mut file = try!(File::create(file_path));
+	try!(file.write_all(compressed));
+
+	Ok((hash, compressed_size))
+}
+
 /// Used to build block chunks.
 struct BlockChunker<'a> {
 	client: &'a BlockChainClient,
 	// block, receipt rlp pairs.
 	rlps: VecDeque<Bytes>,
-	genesis_hash: H256,
 	current_hash: H256,
 	hashes: Vec<H256>,
+	snappy_buffer: Vec<u8>,
 }
 
 impl<'a> BlockChunker<'a> {
-	// Try to fill the buffers, moving backwards from current block hash.
-	// This will return true if it created a block chunk, false otherwise.
-	fn fill_buffers(&mut self) -> bool {
+	// Repeatedly fill the buffers and writes out chunks, moving backwards from starting block hash.
+	// Loops until we reach the genesis, and writes out the remainder.
+	fn chunk_all(&mut self, genesis_hash: H256, path: &Path) -> Result<(), Error> {
 		let mut loaded_size = 0;
-		let mut blocks_loaded = 0;
 
-		while loaded_size < PREFERRED_CHUNK_SIZE && self.current_hash != self.genesis_hash {
-
-			// skip compression for now
+		while self.current_hash != genesis_hash {
 			let block = self.client.block(BlockID::Hash(self.current_hash)).unwrap();
+			let view = BlockView::new(&block);
+			let abridged_rlp = AbridgedBlock::from_block_view(&view).into_inner();
+
 			let receipts = self.client.block_receipts(&self.current_hash).unwrap();
 
 			let pair = {
 				let mut pair_stream = RlpStream::new_list(2);
-				pair_stream.append(&block).append(&receipts);
+				pair_stream.append(&abridged_rlp).append(&receipts);
 				pair_stream.out()
 			};
 
@@ -67,41 +106,38 @@ impl<'a> BlockChunker<'a> {
 
 			// cut off the chunk if too large
 			if new_loaded_size > PREFERRED_CHUNK_SIZE {
-				break;
+				let header = view.header_view();
+				try!(self.write_chunk(header.parent_hash(), header.number(), path));
+				loaded_size = pair.len();
 			} else {
 				loaded_size = new_loaded_size;
 			}
 
 			self.rlps.push_front(pair);
-			self.current_hash = BlockView::new(&block).header_view().parent_hash();
-			blocks_loaded += 1;
+			self.current_hash = view.header_view().parent_hash();
 		}
 
-		if blocks_loaded > 0 {
-			trace!(target: "snapshot", "prepared block chunk with {} blocks", blocks_loaded);
+		if loaded_size != 0 {
+			// we don't store the genesis block, so once we get to this point,
+			// the "first" block will be number 1.
+			try!(self.write_chunk(genesis_hash, 1, path));
 		}
 
-		loaded_size != 0
+		Ok(())
 	}
 
 	// write out the data in the buffers to a chunk on disk
-	fn write_chunk(&mut self, path: &Path) -> Result<(), Error> {
-		// Todo [rob]: compress raw data, put parent hash and block number into chunk.
-		let mut rlp_stream = RlpStream::new_list(self.rlps.len());
+	fn write_chunk(&mut self, parent_hash: H256, number: u64, path: &Path) -> Result<(), Error> {
+		trace!(target: "snapshot", "prepared block chunk with {} blocks", self.rlps.len());
+		let mut rlp_stream = RlpStream::new_list(self.rlps.len() + 2);
+		rlp_stream.append(&parent_hash).append(&number);
 		for pair in self.rlps.drain(..) {
 			rlp_stream.append(&pair);
 		}
 
 		let raw_data = rlp_stream.out();
-		let hash = raw_data.sha3();
-
-		trace!(target: "snapshot", "writing block chunk. hash: {},  size: {} bytes", hash.hex(), raw_data.len());
-
-		let mut file_path = path.to_owned();
-		file_path.push(hash.hex());
-
-		let mut file = try!(File::create(file_path));
-		try!(file.write_all(&raw_data));
+		let (hash, size) = try!(write_chunk(&raw_data, &mut self.snappy_buffer, path));
+		trace!(target: "snapshot", "wrote block chunk. hash: {}, size: {}, uncompressed size: {}", hash.hex(), size, raw_data.len());
 
 		self.hashes.push(hash);
 		Ok(())
@@ -117,17 +153,13 @@ pub fn chunk_blocks(client: &BlockChainClient, best_block_hash: H256, genesis_ha
 	let mut chunker = BlockChunker {
 		client: client,
 		rlps: VecDeque::new(),
-		genesis_hash: genesis_hash,
 		current_hash: best_block_hash,
 		hashes: Vec::new(),
+		snappy_buffer: vec![0; snappy::max_compressed_len(PREFERRED_CHUNK_SIZE)],
 	};
 
-	while chunker.fill_buffers() {
-		try!(chunker.write_chunk(path));
-	}
-	if chunker.rlps.len() != 0 {
-		try!(chunker.write_chunk(path));
-	}
+	try!(chunker.chunk_all(genesis_hash, path));
+
 	Ok(chunker.hashes)
 }
 
@@ -137,6 +169,7 @@ struct StateChunker<'a> {
 	rlps: Vec<Bytes>,
 	cur_size: usize,
 	snapshot_path: &'a Path,
+	snappy_buffer: Vec<u8>,
 }
 
 impl<'a> StateChunker<'a> {
@@ -164,23 +197,13 @@ impl<'a> StateChunker<'a> {
 	// Write out the buffer to disk, pushing the created chunk's hash to
 	// the list.
 	fn write_chunk(&mut self) -> Result<(), Error> {
-		trace!(target: "snapshot", "writing state chunk. uncompressed size: {}", self.cur_size);
-
-		let bytes = {
-			let mut stream = RlpStream::new();
-			stream.append(&&self.rlps[..]);
-			stream.out()
-		};
-
+		let mut stream = RlpStream::new();
+		stream.append(&&self.rlps[..]);
 		self.rlps.clear();
 
-		let hash = bytes.sha3();
-
-		let mut path = self.snapshot_path.to_owned();
-		path.push(hash.hex());
-
-		let mut file = try!(File::create(path));
-		try!(file.write_all(&bytes));
+		let raw_data = stream.out();
+		let (hash, compressed_size) = try!(write_chunk(&raw_data, &mut self.snappy_buffer, self.snapshot_path));
+		trace!(target: "snapshot", "wrote state chunk. size: {}, uncompressed size: {}", compressed_size, raw_data.len());
 
 		self.hashes.push(hash);
 		self.cur_size = 0;
@@ -202,6 +225,7 @@ pub fn chunk_state(db: &HashDB, root: &H256, path: &Path) -> Result<Vec<H256>, E
 		rlps: Vec::new(),
 		cur_size: 0,
 		snapshot_path: path,
+		snappy_buffer: vec![0; snappy::max_compressed_len(PREFERRED_CHUNK_SIZE)],
 	};
 
 	trace!(target: "snapshot", "beginning state chunking");
