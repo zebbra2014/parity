@@ -758,7 +758,6 @@ impl<Message> Host<Message> where Message: Send + Sync + Clone {
 						break;
 					},
 					Ok(SessionData::Ready) => {
-						self.num_sessions.fetch_add(1, AtomicOrdering::SeqCst);
 						if !s.info.originated {
 							let session_count = self.session_count();
 							let reserved_nodes = self.reserved_nodes.read().unwrap();
@@ -775,6 +774,9 @@ impl<Message> Host<Message> where Message: Send + Sync + Clone {
 								}
 							}
 
+							// increment the session counter only once we have decided to accept.
+							self.num_sessions.fetch_add(1, AtomicOrdering::SeqCst);
+
 							// Add it no node table
 							if let Ok(address) = s.remote_addr() {
 								let entry = NodeEntry { id: s.id().unwrap().clone(), endpoint: NodeEndpoint { address: address, udp_port: address.port() } };
@@ -784,6 +786,9 @@ impl<Message> Host<Message> where Message: Send + Sync + Clone {
 									discovery.add_node(entry);
 								}
 							}
+						} else {
+							// we initiated the session, just increment and proceed
+							self.num_sessions.fetch_add(1, AtomicOrdering::SeqCst);
 						}
 						for (p, _) in self.handlers.read().unwrap().iter() {
 							if s.have_capability(p)  {
